@@ -464,7 +464,7 @@ install(
     )
 # Packaging invokes UNIX commands, which are not available on Windows.
 
-if(NOT WIN32)
+if(NOT WIN32 AND NOT THEROCK_HIP_CPU_ONLY)
     add_subdirectory(packaging)
 endif()
 

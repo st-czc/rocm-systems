@@ -6,8 +6,9 @@
 # It is possible to support multiple backends concurrently in the same binary.
 option(ROCCLR_ENABLE_HSA   "Enable support for HSA runtime"    ON)
 option(ROCCLR_ENABLE_PAL   "Enable support for PAL runtime"    OFF)
+option(ROCCLR_ENABLE_CPU   "Enable support for host (CPU) runtime" OFF)
 
-if((NOT ROCCLR_ENABLE_HSA) AND (NOT ROCCLR_ENABLE_PAL))
+if((NOT ROCCLR_ENABLE_HSA) AND (NOT ROCCLR_ENABLE_PAL) AND (NOT ROCCLR_ENABLE_CPU))
   message(FATAL "Support for at least one runtime needs to be enabled!")
 endif()
 
@@ -142,4 +143,8 @@ endif()
 
 if(ROCCLR_ENABLE_PAL)
   include(ROCclrPAL)
+endif()
+
+if(ROCCLR_ENABLE_CPU)
+  include(ROCclrCPU)
 endif()

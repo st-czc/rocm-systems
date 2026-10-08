@@ -26,6 +26,10 @@ extern void PalDeviceUnload();
 //}
 #endif  // WITH_PAL_DEVICE
 
+#if defined(WITH_CPU_DEVICE)
+#include "device/cpu/cpudevice.hpp"
+#endif  // WITH_CPU_DEVICE
+
 #include "platform/runtime.hpp"
 #include "platform/program.hpp"
 #include "thread/monitor.hpp"
@@ -249,6 +253,10 @@ std::pair<const Isa*, const Isa*> Isa::supportedIsas() {
       {"gfx1250-strict", true, true, 12, 5, 0, NONE, NONE, 4, 32, 1, 256, 320* Ki, 64, 1024},
       {"gfx12-generic", true, true, 12, 0, 0, NONE, NONE, 2, 32, 1, 256, 64 * Ki, 32, 1024},
       {"gfx12-5-generic", true, true, 12, 5, 0, NONE, NONE, 4, 32, 1, 256, 320* Ki, 64, 1024},
+#if defined(WITH_CPU_DEVICE)
+      // Host CPU target.
+      {"spvcpu", false, false, 0, 0, 0, NONE, NONE, 1, 1, 1, 0, 0, 1, 1},
+#endif  // WITH_CPU_DEVICE
   };
   return std::make_pair(std::begin(supportedIsas_), std::end(supportedIsas_));
 }
@@ -903,6 +911,13 @@ bool Device::init() {
     ClPrint(amd::LOG_INFO, amd::LOG_INIT, "PAL backend initialized");
   }
 #endif  // WITH_PAL_DEVICE
+#if defined(WITH_CPU_DEVICE)
+  // Register online CPU devices before filling any missing offline targets.
+  ret |= cpu::Device::init();
+  if (!amd::IS_HIP) {
+    ret |= cpu::NullDevice::init();
+  }
+#endif  // WITH_CPU_DEVICE
   return ret;
 }
 
@@ -929,6 +944,9 @@ void Device::tearDown() {
     PalDeviceUnload();
   }
 #endif  // WITH_PAL_DEVICE
+#if defined(WITH_CPU_DEVICE)
+  cpu::Device::tearDown();
+#endif  // WITH_CPU_DEVICE
 }
 
 Device::Device()

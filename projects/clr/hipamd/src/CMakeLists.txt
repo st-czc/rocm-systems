@@ -230,8 +230,10 @@ if(__HIP_ENABLE_PCH)
   target_sources(amdhip64 PRIVATE ${CMAKE_BINARY_DIR}/hip_pch.o)
 endif()
 
+if(NOT THEROCK_HIP_CPU_ONLY)
 # Add hiprtc
 add_subdirectory(hiprtc)
+endif()
 
 # HRR in-tree capture layer
 add_subdirectory(hrr)
