@@ -151,12 +151,86 @@ device::Program* NullDevice::createProgram(amd::Program& owner, amd::option::Opt
 }
 
 device::Memory* Device::createMemory(amd::Memory& owner) const {
-  Memory* memory = new Memory(*const_cast<Device*>(this), owner);
-  if (memory != nullptr && !memory->isValid()) {
+  return createBufferMemory(owner, owner.getAlignment());
+}
+
+Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
+  if (owner.asBuffer() == nullptr || owner.isInterop()) {
+    LogError("CPU device only supports system-memory buffers!");
+    return nullptr;
+  }
+
+  const cl_mem_flags memFlags = owner.getMemFlags();
+  if ((memFlags & (CL_MEM_VA_RANGE_AMD | CL_MEM_BUS_ADDRESSABLE_AMD |
+                   CL_MEM_EXTERNAL_PHYSICAL_AMD | ROCCLR_MEM_INTERPROCESS |
+                   ROCCLR_MEM_HSA_SIGNAL_MEMORY)) ||
+      owner.ipcShared() ||
+      owner.getSvmPtr() == reinterpret_cast<void*>(amd::Memory::MemoryType::kArenaMemoryPtr)) {
+    LogError("Unsupported CPU buffer memory requirements!");
+    return nullptr;
+  }
+
+  Memory* memory = new Memory(*this, owner, alignment);
+  if (memory == nullptr || !memory->isValid()) {
+    LogError("Failed creating CPU buffer memory!");
     delete memory;
     return nullptr;
   }
+
+  if (owner.getType() == CL_MEM_OBJECT_PIPE) {
+    const size_t pipeInit[3] = {0, 0, owner.asPipe()->getMaxNumPackets()};
+    std::memcpy(reinterpret_cast<void*>(memory->virtualAddress()), pipeInit, sizeof(pipeInit));
+  }
   return memory;
+}
+
+void* Device::svmAlloc(amd::Context& context, size_t size, size_t alignment,
+                       cl_svm_mem_flags flags, void* svmPtr) const {
+  void* svmPtrUsed = reinterpret_cast<void*>(amd::Memory::MemoryType::kSvmMemoryPtr);
+  if (svmPtr != nullptr) {
+    amd::Memory* existing = amd::MemObjMap::FindMemObj(svmPtr);
+    if (existing != nullptr) {
+      return existing->getSvmPtr();
+    }
+    if (!(flags & CL_MEM_USE_HOST_PTR)) {
+      LogError("Cannot find the supplied CPU SVM pointer!");
+      return nullptr;
+    }
+    svmPtrUsed = svmPtr;
+  }
+
+  if (size == 0 || (alignment != 0 && (alignment & (alignment - 1)) != 0)) {
+    LogError("Invalid CPU SVM allocation size or alignment!");
+    return nullptr;
+  }
+
+  amd::Buffer* mem = new (context) amd::Buffer(context, flags, size, svmPtrUsed, alignment);
+  if (mem == nullptr) {
+    LogError("Failed creating a CPU SVM memory object!");
+    return nullptr;
+  }
+  if (!mem->create(nullptr)) {
+    LogError("Failed creating a CPU SVM hidden buffer!");
+    mem->release();
+    return nullptr;
+  }
+
+  // Use the regular allocation path to register both the device backing and svmBase.
+  device::Memory* memory = mem->getDeviceMemory(*this);
+  if (memory == nullptr) {
+    mem->release();
+    return nullptr;
+  }
+  amd::MemObjMap::AddMemObj(mem->getSvmPtr(), mem);
+  return mem->getSvmPtr();
+}
+
+void Device::svmFree(void* ptr) const {
+  amd::Memory* mem = amd::MemObjMap::FindMemObj(ptr);
+  if (mem != nullptr) {
+    amd::MemObjMap::RemoveMemObj(mem->getSvmPtr());
+    mem->release();
+  }
 }
 
 void NullDevice::fillDeviceInfo() {

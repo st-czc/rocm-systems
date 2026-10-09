@@ -22,13 +22,13 @@ class Device;
 class Memory : public device::Memory {
  public:
   //! Constructor (from an amd::Memory object)
-  Memory(Device& dev, amd::Memory& owner);
+  Memory(const Device& dev, amd::Memory& owner, size_t alignment = 0);
 
   //! Default destructor
   virtual ~Memory();
 
   //! Reports whether the backing storage was created successfully.
-  bool isValid() const { return ptr_ != nullptr || size() == 0; }
+  bool isValid() const { return ptr_ != nullptr; }
 
   //! Returns the host pointer as the device virtual address
   virtual uint64_t virtualAddress() const { return reinterpret_cast<uint64_t>(ptr_); }
@@ -39,14 +39,12 @@ class Memory : public device::Memory {
   //! Immediate blocking write from the device cache to the owner's backing store.
   virtual void syncHostFromCache(device::VirtualDevice* vDev, SyncFlags syncFlags = SyncFlags()) {}
 
+  //! Updates the device memory from the owner's host allocation.
+  void syncCacheFromHost(device::VirtualDevice& vDev, SyncFlags syncFlags = SyncFlags()) {}
+
   //! Map the device memory to CPU visible
   virtual void* cpuMap(device::VirtualDevice& vDev, uint flags = 0, uint startLayer = 0,
                        uint numLayers = 0, size_t* rowPitch = NULL, size_t* slicePitch = NULL) {
-    amd::Image* image = owner()->asImage();
-    if (image != NULL) {
-      *rowPitch = image->getRowPitch();
-      *slicePitch = image->getSlicePitch();
-    }
     return ptr_;
   }
 
@@ -54,6 +52,8 @@ class Memory : public device::Memory {
   virtual void cpuUnmap(device::VirtualDevice& vDev) {}
 
  private:
+  enum class StorageOwnership { Borrowed, AlignedAllocation };
+
   //! Allocates the host memory
   bool allocate(size_t size, size_t alignment);
 
@@ -66,9 +66,9 @@ class Memory : public device::Memory {
   //! Disable default operator=
   Memory& operator=(const Memory&);
 
-  Device& dev_;        //!< The host device that owns this memory
+  const Device& dev_;  //!< The host device that owns this memory
   address ptr_;        //!< Host allocation backing the memory object
-  bool allocated_;     //!< True if this object owns the allocation at ptr_
+  StorageOwnership ownership_;  //!< Selects whether and how ptr_ is released
 };
 
 }  // namespace amd::cpu

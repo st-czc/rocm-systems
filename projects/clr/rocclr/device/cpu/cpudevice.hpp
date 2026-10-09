@@ -196,6 +196,11 @@ class Device : public NullDevice {
   using NullDevice::createMemory;
   virtual device::Memory* createMemory(amd::Memory& owner) const override;
 
+  virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
+                         cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
+                         void* svmPtr = nullptr) const override;
+  virtual void svmFree(void* ptr) const override;
+
   virtual device::Signal* createSignal() const override { return new device::HostSignal; }
 
   // Preserve the online device's existing query and placeholder behavior.
@@ -259,6 +264,9 @@ class Device : public NullDevice {
 #endif
 
  private:
+  //! Creates buffer backing with the requested system-memory alignment.
+  Memory* createBufferMemory(amd::Memory& owner, size_t alignment) const;
+
   //! Disable default copy constructor
   Device(const Device&);
 

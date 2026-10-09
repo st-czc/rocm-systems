@@ -9,21 +9,20 @@
 
 #include "device/device.hpp"
 
+#include <cstdint>
+
 //! CPU Device Implementation
 namespace amd::cpu {
 
-//! The host execution environment for one command queue.
-//!
-//! The host device does not execute device code, so this only has to be a
-//! valid object to hand to amd::HostQueue: creating it is what makes the queue
-//! accept commands, and every command submission is rejected. Anything that
-//! needs real work (kernels, memory transfers, signals) is unimplemented on
-//! purpose.
+class Device;
+
+//! Host execution environment for one command queue. It runs supported memory
+//! commands synchronously in process memory.
 class VirtualDevice : public device::VirtualDevice {
  public:
-  VirtualDevice(amd::Device& device) : device::VirtualDevice(device) {}
+  VirtualDevice(Device& device);
 
-  virtual ~VirtualDevice() {}
+  virtual ~VirtualDevice();
 
   virtual uint64_t getQueueID() { return 0; }
 
@@ -31,9 +30,9 @@ class VirtualDevice : public device::VirtualDevice {
 
   virtual void HiddenHeapInit() {}
 
-  virtual void submitReadMemory(amd::ReadMemoryCommand& cmd) { Unsupported("ReadMemory"); }
-  virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd) { Unsupported("WriteMemory"); }
-  virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd) { Unsupported("CopyMemory"); }
+  virtual void submitReadMemory(amd::ReadMemoryCommand& cmd);
+  virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd);
+  virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd);
   virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) { Unsupported("CopyMemoryP2P"); }
   virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
     Unsupported("BatchCopyMemory");
@@ -48,7 +47,7 @@ class VirtualDevice : public device::VirtualDevice {
   virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) { Unsupported("UnmapMemory"); }
   virtual void submitKernel(amd::NDRangeKernelCommand& cmd) { Unsupported("Kernel"); }
   virtual void submitNativeFn(amd::NativeFnCommand& cmd) { Unsupported("NativeFn"); }
-  virtual void submitMarker(amd::Marker& cmd) { Unsupported("Marker"); }
+  virtual void submitMarker(amd::Marker& cmd);
   virtual void submitAccumulate(amd::AccumulateCommand& cmd) { Unsupported("Accumulate"); }
   virtual void submitExternalSemaphoreCmd(amd::ExternalSemaphoreCmd& cmd) {
     Unsupported("ExternalSemaphore");
@@ -68,7 +67,7 @@ class VirtualDevice : public device::VirtualDevice {
     Unsupported("ThreadTraceMemObjects");
   }
   virtual void submitThreadTrace(amd::ThreadTraceCommand& cmd) { Unsupported("ThreadTrace"); }
-  virtual void flush(amd::Command* list = NULL, bool wait = false) {}
+  virtual void flush(amd::Command* list = NULL, bool wait = false);
   virtual void submitSvmFreeMemory(amd::SvmFreeMemoryCommand& cmd) { Unsupported("SvmFreeMemory"); }
   virtual void submitSvmCopyMemory(amd::SvmCopyMemoryCommand& cmd) { Unsupported("SvmCopyMemory"); }
   virtual void submitSvmFillMemory(amd::SvmFillMemoryCommand& cmd) { Unsupported("SvmFillMemory"); }
@@ -84,6 +83,8 @@ class VirtualDevice : public device::VirtualDevice {
  private:
   //! The host backend implements no command.
   void Unsupported(const char* command);
+
+  const Device& dev_;
 
   //! Disable default copy constructor
   VirtualDevice(const VirtualDevice&);
