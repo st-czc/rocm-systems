@@ -694,6 +694,25 @@ __device__ inline static void __threadfence_system() {
   if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fence))
     __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "");
 }
+
+#if defined(__SPVCPU__)
+// SPIR-V control barrier, implemented by the Native CPU device library.
+__device__ __attribute__((convergent)) void __spirv_ControlBarrier(int Execution, int Memory,
+                                                                   int Semantics);
+
+// SPIR-V Scope and MemorySemantics operand values.
+#define __HIP_SPIRV_SCOPE_WORKGROUP 2
+#define __HIP_SPIRV_SEQUENTIALLY_CONSISTENT 0x10
+#define __HIP_SPIRV_WORKGROUP_MEMORY 0x100
+#define __HIP_SPIRV_CROSS_WORKGROUP_MEMORY 0x200
+
+__device__ inline static void __work_group_barrier(__cl_mem_fence_flags flags) {
+  int semantics = __HIP_SPIRV_SEQUENTIALLY_CONSISTENT;
+  if (flags & __CLK_LOCAL_MEM_FENCE) semantics |= __HIP_SPIRV_WORKGROUP_MEMORY;
+  if (flags & __CLK_GLOBAL_MEM_FENCE) semantics |= __HIP_SPIRV_CROSS_WORKGROUP_MEMORY;
+  __spirv_ControlBarrier(__HIP_SPIRV_SCOPE_WORKGROUP, __HIP_SPIRV_SCOPE_WORKGROUP, semantics);
+}
+#else
 __device__ inline static void __work_group_barrier(__cl_mem_fence_flags flags) {
   if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fence) &&
       __builtin_amdgcn_is_invocable(__builtin_amdgcn_s_barrier)) {
@@ -714,6 +733,7 @@ __device__ inline static void __work_group_barrier(__cl_mem_fence_flags flags) {
     }
   }
 }
+#endif
 
 __device__ inline static void __barrier(int n) { __work_group_barrier((__cl_mem_fence_flags)n); }
 

@@ -244,6 +244,28 @@ typedef struct dim3 {
 #pragma push_macro("__DEVICE__")
 #define __DEVICE__ static __device__ __forceinline__
 
+#if defined(__SPVCPU__)
+// SPIR-V work-item queries, implemented by the Native CPU device library.
+__device__ __attribute__((const)) size_t __spirv_BuiltInLocalInvocationId(int);
+__DEVICE__ unsigned int __hip_get_thread_idx_x() { return __spirv_BuiltInLocalInvocationId(0); }
+__DEVICE__ unsigned int __hip_get_thread_idx_y() { return __spirv_BuiltInLocalInvocationId(1); }
+__DEVICE__ unsigned int __hip_get_thread_idx_z() { return __spirv_BuiltInLocalInvocationId(2); }
+
+__device__ __attribute__((const)) size_t __spirv_BuiltInWorkgroupId(int);
+__DEVICE__ unsigned int __hip_get_block_idx_x() { return __spirv_BuiltInWorkgroupId(0); }
+__DEVICE__ unsigned int __hip_get_block_idx_y() { return __spirv_BuiltInWorkgroupId(1); }
+__DEVICE__ unsigned int __hip_get_block_idx_z() { return __spirv_BuiltInWorkgroupId(2); }
+
+__device__ __attribute__((const)) size_t __spirv_BuiltInWorkgroupSize(int);
+__DEVICE__ unsigned int __hip_get_block_dim_x() { return __spirv_BuiltInWorkgroupSize(0); }
+__DEVICE__ unsigned int __hip_get_block_dim_y() { return __spirv_BuiltInWorkgroupSize(1); }
+__DEVICE__ unsigned int __hip_get_block_dim_z() { return __spirv_BuiltInWorkgroupSize(2); }
+
+__device__ __attribute__((const)) size_t __spirv_BuiltInNumWorkgroups(int);
+__DEVICE__ unsigned int __hip_get_grid_dim_x() { return __spirv_BuiltInNumWorkgroups(0); }
+__DEVICE__ unsigned int __hip_get_grid_dim_y() { return __spirv_BuiltInNumWorkgroups(1); }
+__DEVICE__ unsigned int __hip_get_grid_dim_z() { return __spirv_BuiltInNumWorkgroups(2); }
+#else
 __DEVICE__ unsigned int __hip_get_thread_idx_x() { return __builtin_amdgcn_workitem_id_x(); }
 __DEVICE__ unsigned int __hip_get_thread_idx_y() { return __builtin_amdgcn_workitem_id_y(); }
 __DEVICE__ unsigned int __hip_get_thread_idx_z() { return __builtin_amdgcn_workitem_id_z(); }
@@ -260,6 +282,7 @@ extern "C" __device__ __attribute__((const)) size_t __ockl_get_num_groups(unsign
 __DEVICE__ unsigned int __hip_get_grid_dim_x() { return __ockl_get_num_groups(0); }
 __DEVICE__ unsigned int __hip_get_grid_dim_y() { return __ockl_get_num_groups(1); }
 __DEVICE__ unsigned int __hip_get_grid_dim_z() { return __ockl_get_num_groups(2); }
+#endif
 
 #define __HIP_DEVICE_BUILTIN(DIMENSION, FUNCTION)                                                  \
   __declspec(property(get = __get_##DIMENSION)) unsigned int DIMENSION;                            \
