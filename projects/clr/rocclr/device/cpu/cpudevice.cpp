@@ -244,19 +244,20 @@ void NullDevice::fillDeviceInfo() {
   ::strncpy(info_.boardName_, "CPU", sizeof(info_.boardName_) - 1);
   ::snprintf(info_.driverVersion_, sizeof(info_.driverVersion_), "%d.%d", 1, 0);
 
-  // The host device reports one compute unit executing a single work item at a
-  // time. The wavefront width must stay non-zero: the HIP runtime computes the
-  // maximum blocks per compute unit as maxThreadsPerCU_ / wavefrontWidth_.
-  info_.maxComputeUnits_ = 1;
-  info_.maxPhysicalComputeUnits_ = 1;
-  info_.wavefrontWidth_ = 1;
-  info_.simdWidth_ = 1;
-  info_.maxThreadsPerCU_ = 1;
-  info_.maxWorkGroupSize_ = 1;
-  info_.preferredWorkGroupSize_ = 1;
+  // One compute unit, one work item at a time. The wavefront width must not be
+  // zero. TODO: The limits below match gfx906. Derive them from the host.
+  info_.maxComputeUnits_ = 60;
+  info_.maxPhysicalComputeUnits_ = 60;
+  info_.wavefrontWidth_ = 64;
+  info_.simdWidth_ = 16;
+  info_.simdPerCU_ = 4;
+  info_.simdInstructionWidth_ = 1;
+  info_.maxThreadsPerCU_ = 2560;
+  info_.maxWorkGroupSize_ = 1024;
+  info_.preferredWorkGroupSize_ = 256;
   info_.maxWorkItemDimensions_ = 3;
   for (size_t dim = 0; dim < 3; ++dim) {
-    info_.maxWorkItemSizes_[dim] = 1;
+    info_.maxWorkItemSizes_[dim] = 1024;
     info_.maxGridDim_[dim] = UINT32_MAX;
   }
   info_.preferredVectorWidthChar_ = 1;
@@ -275,11 +276,12 @@ void NullDevice::fillDeviceInfo() {
   info_.doubleFPConfig_ = CL_FP_ROUND_TO_NEAREST;
   info_.halfFPConfig_ = CL_FP_ROUND_TO_NEAREST;
 
-  // The host device provides system memory only. Report half of the host
-  // physical memory, matching what the ROCr backend reports for system memory.
-  info_.localMemType_ = CL_NONE;
-  info_.localMemSize_ = 0;
-  info_.localMemSizePerCU_ = 0;
+  // System memory only, reported as half of the host physical memory.
+  // TODO: The local memory sizes match gfx906. Set them from the cost of
+  // __shared__ on the host.
+  info_.localMemType_ = CL_LOCAL;
+  info_.localMemSize_ = 64 * Ki;
+  info_.localMemSizePerCU_ = 64 * Ki;
   info_.globalMemSize_ = amd::Os::hostTotalPhysicalMemory() / 2;
   info_.globalMemSize_ = std::max(info_.globalMemSize_, static_cast<uint64_t>(1 * Gi));
   info_.maxMemAllocSize_ = amd::alignDown(info_.globalMemSize_, sizeof(uint64_t));

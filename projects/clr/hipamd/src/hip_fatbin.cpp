@@ -185,6 +185,15 @@ static std::string TargetToGeneric(const std::string &input) {
   return generic_name;
 }
 
+#if defined(WITH_CPU_DEVICE)
+// Rewrite the spvcpu ISA name to the offload bundle entry name.
+static void MapSPVCPUIsaNameForBundleEntry(std::string& isa_name) {
+  static constexpr char kSpvcpuIsaName[] = "amdgcn-amd-amdhsa--spvcpu";
+  static constexpr char kSpvcpuBundleIsaName[] = "spvcpu-unknown-hipcpu-unknown-spvcpu";
+  if (isa_name == kSpvcpuIsaName) isa_name = kSpvcpuBundleIsaName;
+}
+#endif
+
 static bool IsCodeObjectUncompressed(const void* image, size_t image_size) {
   constexpr size_t magic_size = sizeof(symbols::kOffloadBundleUncompressedMagicStr) - 1;
   if (image_size < magic_size) {
@@ -508,6 +517,9 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
   unique_isa_names.insert(spirv_isa_name);
   for (auto device : devices) {
     std::string device_name = device->devices()[0]->isa().isaName();
+#if defined(WITH_CPU_DEVICE)
+    MapSPVCPUIsaNameForBundleEntry(device_name);
+#endif
     unique_isa_names.insert(device_name);
     auto generic_name = TargetToGeneric(device_name);
     if (!generic_name.empty()) {
@@ -537,6 +549,9 @@ hipError_t FatBinaryInfo::ExtractFatBinaryUsingCOMGR(const std::vector<hip::Devi
                            code_obj_map.find(spirv_isa_name_empty) != code_obj_map.end();
     for (auto device : devices) {
       std::string device_name = device->devices()[0]->isa().isaName();
+#if defined(WITH_CPU_DEVICE)
+      MapSPVCPUIsaNameForBundleEntry(device_name);
+#endif
       auto generic_target_name = TargetToGeneric(device_name);   // Generic Code Object
       auto native_co = code_obj_map.find(device_name);           // Native Code Object
       auto generic_co = code_obj_map.find(generic_target_name);  // generic Code Object

@@ -19,18 +19,44 @@ namespace amd::cpu {
 
 class Program;
 
-//! A host kernel handle. The host backend does not execute device code, so the
-//! kernel object carries only the workgroup metadata the runtime queries.
+//! Work-group state passed last to Native CPU entry points. Its layout mirrors
+//! native_cpu::state in the Native CPU device library.
+struct NativeCpuState {
+  size_t global_id[3];
+  size_t global_range[3];
+  size_t workgroup_size[3];
+  size_t workgroup_id[3];
+  size_t local_id[3];
+  size_t num_groups[3];
+  size_t global_offset[3];
+  uint32_t num_sub_groups;
+  uint32_t sub_group_id;
+  uint32_t sub_group_local_id;
+  uint32_t sub_group_size;
+};
+
+//! Per-kernel subhandler. It takes one pointer per argument and the work-group
+//! state, and it runs one work-group per call.
+using Subhandler = void (*)(void** args, NativeCpuState* state);
+
+//! Host kernel handle. It carries the work-group metadata that the runtime
+//! queries.
 class Kernel : public device::Kernel {
  public:
   Kernel(const std::string& name, const Program* prog);
 
   virtual ~Kernel() {}
 
-  //! Returns the program associated with this kernel
-  const Program* program() const;
+  //! Builds the abstraction-layer state the runtime queries for this kernel.
+  bool init();
+
+  //! The subhandler resolved from the loaded device image.
+  void setEntry(Subhandler entry) { entry_ = entry; }
+  Subhandler entry() const { return entry_; }
 
  private:
+  Subhandler entry_ = nullptr;
+
   //! Disable default copy constructor
   Kernel(const Kernel&);
 

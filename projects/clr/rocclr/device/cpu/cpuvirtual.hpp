@@ -45,7 +45,7 @@ class VirtualDevice : public device::VirtualDevice {
   }
   virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { Unsupported("MapMemory"); }
   virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) { Unsupported("UnmapMemory"); }
-  virtual void submitKernel(amd::NDRangeKernelCommand& cmd) { Unsupported("Kernel"); }
+  virtual void submitKernel(amd::NDRangeKernelCommand& cmd);
   virtual void submitNativeFn(amd::NativeFnCommand& cmd) { Unsupported("NativeFn"); }
   virtual void submitMarker(amd::Marker& cmd);
   virtual void submitAccumulate(amd::AccumulateCommand& cmd) { Unsupported("Accumulate"); }

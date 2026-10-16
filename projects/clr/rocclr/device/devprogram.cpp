@@ -1769,6 +1769,11 @@ bool Program::createKernelMetadataMap(void* binary, size_t binSize) {
   }
 
   amd_comgr_status_t status;
+  // Skip the ISA compatibility check for the CPU device image. The bundle entry
+  // already named its target.
+#if defined(WITH_CPU_DEVICE)
+  if (std::strcmp(device().isa().targetId(), "spvcpu") != 0) {
+#endif
   if (device().isOnline()) {
     size_t requiredSize = 0;
     status = amd::Comgr::get_data_isa_name(binaryData.data(), &requiredSize, nullptr);
@@ -1797,6 +1802,9 @@ bool Program::createKernelMetadataMap(void* binary, size_t binSize) {
       return false;
     }
   }
+#if defined(WITH_CPU_DEVICE)
+  }
+#endif
 
   status = amd::Comgr::get_data_metadata(binaryData.data(), &metadata_);
   if (status != AMD_COMGR_STATUS_SUCCESS) {

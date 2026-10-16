@@ -293,9 +293,15 @@ class Program {
   virtual bool createBinary(amd::option::Options* options) = 0;
 
   //! Initialize Binary (used only for clCreateProgramWithBinary()).
+#if defined(WITH_CPU_DEVICE)
+  virtual bool initClBinary(const char* binaryIn, size_t size,
+                            amd::Os::FileDesc fdesc = amd::Os::FDescInit(), size_t foffset = 0,
+                            std::string uri = std::string());
+#else
   bool initClBinary(const char* binaryIn, size_t size,
                     amd::Os::FileDesc fdesc = amd::Os::FDescInit(), size_t foffset = 0,
                     std::string uri = std::string());
+#endif
 
   //! Initialize Binary
   virtual bool initClBinary();

@@ -7,15 +7,21 @@
 #include "device/cpu/cpukernel.hpp"
 
 #include "device/cpu/cpuprogram.hpp"
+#include "platform/kernel.hpp"
+#include "utils/debug.hpp"
 
 #include <chrono>
 
 namespace amd::cpu {
 
 Kernel::Kernel(const std::string& name, const Program* prog)
-    : device::Kernel(prog->device(), name, *prog) {}
+    : device::Kernel(prog->device(), name, *prog) {
+  LogPrintfInfo("CPU Kernel created: kernel=%p name=%s program=%p device=%p signature=%p",
+                static_cast<const void*>(this), name.c_str(), static_cast<const void*>(prog),
+                static_cast<const void*>(&prog->device()), static_cast<const void*>(signature_));
+}
 
-const Program* Kernel::program() const { return static_cast<const Program*>(&prog_); }
+bool Kernel::init() { return GetAttrCodePropMetadata(); }
 
 }  // namespace amd::cpu
 
