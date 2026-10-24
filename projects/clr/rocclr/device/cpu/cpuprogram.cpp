@@ -21,6 +21,11 @@ namespace amd::cpu {
 //! Suffix of the per-kernel subhandler exported by the Native CPU pipeline.
 static constexpr std::string_view kSubhandlerSuffix = ".SYCLNCPU";
 
+//! Name of the entry point that sets the dynamic shared memory size of a
+//! kernel.
+static constexpr std::string_view kDynamicSharedSetterName =
+    "__hipcpu_set_dynamic_shared_mem_bytes";
+
 //! ELF device image for this host. The fat binary marks it with the AMDGPU
 //! machine and the HSA OS ABI so the loader rejects it. The runtime removes the
 //! mark before it hands the image to the loader.
@@ -183,6 +188,11 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
     return false;
   }
 
+  // Resolve the setter once per image. It is null when the image does not use
+  // extern __shared__.
+  auto setter = reinterpret_cast<SetDynamicSharedMemBytes>(
+      amd::Os::getSymbol(imageHandle_, kDynamicSharedSetterName.data()));
+
   for (const auto& it : kernels()) {
     Kernel* kernel = static_cast<Kernel*>(it.second);
     const std::string symbol = kernel->name() + std::string(kSubhandlerSuffix);
@@ -193,6 +203,7 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
       return false;
     }
     kernel->setEntry(entry);
+    kernel->setDynamicSharedSetter(setter);
     LogPrintfInfo("CPU Program::setKernels: program=%p kernel=%s entry=%s at %p", this,
                   kernel->name().c_str(), symbol.c_str(), reinterpret_cast<void*>(entry));
   }

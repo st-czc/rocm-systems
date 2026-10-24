@@ -399,6 +399,11 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
                 reinterpret_cast<void*>(hostKernel->entry()), state.num_groups[0],
                 state.num_groups[1], state.num_groups[2]);
 
+  // Set the dynamic shared memory size before the work-groups are dispatched.
+  if (hostKernel->dynamicSharedSetter() != nullptr) {
+    hostKernel->dynamicSharedSetter()(static_cast<uint64_t>(cmd.sharedMemBytes()));
+  }
+
   // One dispatch call per work-group. The work-group function iterates the work
   // items.
   for (size_t z = 0; z < state.num_groups[2]; ++z) {
