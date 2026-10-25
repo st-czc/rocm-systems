@@ -196,6 +196,11 @@ class Device : public NullDevice {
   using NullDevice::createMemory;
   virtual device::Memory* createMemory(amd::Memory& owner) const override;
 
+  //! Returns the CPU memory object for the given memory
+  Memory* getCPUMemory(amd::Memory* mem) const {
+    return static_cast<Memory*>(mem->getDeviceMemory(*this));
+  }
+
   virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
                          cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
                          void* svmPtr = nullptr) const override;

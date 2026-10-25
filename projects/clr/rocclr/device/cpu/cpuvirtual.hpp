@@ -24,6 +24,8 @@ class VirtualDevice : public device::VirtualDevice {
 
   virtual ~VirtualDevice();
 
+  const Device& dev() const { return dev_; }
+
   virtual uint64_t getQueueID() { return 0; }
 
   virtual bool isFenceDirty() const { return false; }
@@ -52,7 +54,7 @@ class VirtualDevice : public device::VirtualDevice {
   virtual void submitExternalSemaphoreCmd(amd::ExternalSemaphoreCmd& cmd) {
     Unsupported("ExternalSemaphore");
   }
-  virtual void submitFillMemory(amd::FillMemoryCommand& cmd) { Unsupported("FillMemory"); }
+  virtual void submitFillMemory(amd::FillMemoryCommand& cmd);
   virtual void submitMigrateMemObjects(amd::MigrateMemObjectsCommand& cmd) {
     Unsupported("MigrateMemObjects");
   }
@@ -81,6 +83,11 @@ class VirtualDevice : public device::VirtualDevice {
   }
 
  private:
+  //! Fills a memory object with a pattern
+  bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
+                  size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,
+                  const amd::Coord3D& size);
+
   //! The host backend implements no command.
   void Unsupported(const char* command);
 

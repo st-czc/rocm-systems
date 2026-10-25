@@ -51,6 +51,34 @@ class BlitManager final : public device::HostBlitManager {
                         uint heapSize, uint numberOfInitialBlocks) const override {
     return false;
   }
+
+  virtual bool fillBuffer(device::Memory& memory, const void* pattern, size_t patternSize,
+                          const amd::Coord3D& surface, const amd::Coord3D& origin,
+                          const amd::Coord3D& size, bool entire, bool forceBlit) const override {
+    const size_t width = size[0];
+    const size_t height = size[1];
+    const size_t depth = size[2];
+
+    amd::Coord3D region{surface[1], surface[2], depth};
+    amd::Coord3D start(origin);
+    amd::BufferRect rect;
+    if (!rect.create(static_cast<size_t*>(start), static_cast<size_t*>(region), surface[0], 0)) {
+      LogError("Misaligned fill surface!");
+      return false;
+    }
+
+    // Fill one row at a time so that the row pitch of the surface is honored
+    for (size_t slice = 0; slice < depth; ++slice) {
+      for (size_t row = 0; row < height; ++row) {
+        if (!HostBlitManager::fillBuffer(memory, pattern, patternSize, surface,
+                                         amd::Coord3D{rect.offset(0, row, slice), 0, 0},
+                                         amd::Coord3D{width, 1, 1}, entire, forceBlit)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
 };
 
 VirtualDevice::VirtualDevice(Device& device)
@@ -329,6 +357,58 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   } else {
     cmd.destination().signalWrite(&dev_);
     cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+  }
+  // profilingEnd();
+}
+
+bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
+                               size_t patternSize, const amd::Coord3D& surface,
+                               const amd::Coord3D& origin, const amd::Coord3D& size) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  Memory* memory = dev().getCPUMemory(amdMemory);
+
+  bool entire = amdMemory->isEntirelyCovered(origin, size);
+  // No necessary to synchronize memory from host for CPU
+
+  bool result = false;
+
+  // Find the the right fill operation
+  switch (type) {
+    case CL_COMMAND_SVM_MEMFILL:
+    case CL_COMMAND_FILL_BUFFER: {
+      result = blitMgr().fillBuffer(*memory, pattern, patternSize, surface, origin, size, entire);
+      break;
+    }
+    case CL_COMMAND_FILL_IMAGE: {
+      // result = blitMgr().fillImage(*memory, pattern, origin, size, entire);
+      Unsupported("FillImage");
+      break;
+    }
+    default:
+      LogError("Unsupported command type for FillMemory!");
+      break;
+  }
+
+  if (!result) {
+    LogError("submitFillMemory failed!");
+    return false;
+  }
+
+  amdMemory->signalWrite(&dev());
+  return true;
+}
+
+void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  // profilingBegin(cmd, true);
+
+  if (!fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
+                  cmd.origin(), cmd.size())) {
+    cmd.setStatus(CL_INVALID_OPERATION);
   }
   // profilingEnd();
 }

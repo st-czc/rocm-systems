@@ -130,8 +130,11 @@ bool Device::create(const amd::Isa& isa) {
   info_.available_ = 1;
   // Copy the system-memory capabilities from the online device. The offline
   // target has no SVM devices.
-  info_.svmCapabilities_ = CL_DEVICE_SVM_COARSE_GRAIN_BUFFER |
-                           CL_DEVICE_SVM_FINE_GRAIN_BUFFER | CL_DEVICE_SVM_FINE_GRAIN_SYSTEM;
+  info_.svmCapabilities_ = 0;
+  info_.svmCapabilities_ |= CL_DEVICE_SVM_COARSE_GRAIN_BUFFER;
+  info_.svmCapabilities_ |= CL_DEVICE_SVM_FINE_GRAIN_BUFFER;
+  info_.svmCapabilities_ |= CL_DEVICE_SVM_FINE_GRAIN_SYSTEM;
+  info_.svmCapabilities_ |= CL_DEVICE_SVM_ATOMICS;
 
   std::vector<amd::Device*> devices{this};
   context_ = new amd::Context(devices, amd::Context::Info());
@@ -292,6 +295,11 @@ void NullDevice::fillDeviceInfo() {
   info_.globalMemCacheLineSize_ = 64;
   info_.memBaseAddrAlign_ = 128;
   info_.minDataTypeAlignSize_ = 128;
+
+  // Linear memory layout. Set unconditionally so that hipMallocPitch and
+  // hipMalloc3D produce a nonzero, aligned pitch even without image support.
+  info_.imagePitchAlignment_ = 256;
+  info_.imageBaseAddressAlignment_ = 256;
 
   // Offline targets cannot allocate or execute.
   info_.svmCapabilities_ = 0;
