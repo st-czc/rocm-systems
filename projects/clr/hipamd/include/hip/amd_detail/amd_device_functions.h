@@ -679,7 +679,41 @@ __device__ inline __hip_uint64_t __lanemask_eq() {
   return mask;
 }
 
+#if defined(__SPVCPU__)
+// SPIR-V control and memory barriers, implemented by the Native CPU device library.
+__device__ __attribute__((convergent)) void __spirv_ControlBarrier(int Execution, int Memory,
+                                                                   int Semantics);
+__device__ __attribute__((convergent)) void __spirv_MemoryBarrier(int Memory, int Semantics);
+
+// SPIR-V Scope and MemorySemantics operand values.
+#define __HIP_SPIRV_SCOPE_CROSS_DEVICE 0
+#define __HIP_SPIRV_SCOPE_DEVICE 1
+#define __HIP_SPIRV_SCOPE_WORKGROUP 2
+#define __HIP_SPIRV_SEQUENTIALLY_CONSISTENT 0x10
+#define __HIP_SPIRV_WORKGROUP_MEMORY 0x100
+#define __HIP_SPIRV_CROSS_WORKGROUP_MEMORY 0x200
+#endif
+
 // Memory Fence Functions
+#if defined(__SPVCPU__)
+// TODO: The Native CPU pipeline ignores the scope and memory-space operands of
+// __spirv_MemoryBarrier and emits a single-threaded fence, so these fences do
+// not yet guarantee cross-thread visibility.
+__device__ inline static void __threadfence() {
+  __spirv_MemoryBarrier(__HIP_SPIRV_SCOPE_DEVICE,
+                        __HIP_SPIRV_SEQUENTIALLY_CONSISTENT | __HIP_SPIRV_CROSS_WORKGROUP_MEMORY);
+}
+
+__device__ inline static void __threadfence_block() {
+  __spirv_MemoryBarrier(__HIP_SPIRV_SCOPE_WORKGROUP,
+                        __HIP_SPIRV_SEQUENTIALLY_CONSISTENT | __HIP_SPIRV_WORKGROUP_MEMORY);
+}
+
+__device__ inline static void __threadfence_system() {
+  __spirv_MemoryBarrier(__HIP_SPIRV_SCOPE_CROSS_DEVICE,
+                        __HIP_SPIRV_SEQUENTIALLY_CONSISTENT | __HIP_SPIRV_CROSS_WORKGROUP_MEMORY);
+}
+#else
 __device__ inline static void __threadfence() {
   if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fence))
     __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "agent");
@@ -694,18 +728,9 @@ __device__ inline static void __threadfence_system() {
   if (__builtin_amdgcn_is_invocable(__builtin_amdgcn_fence))
     __builtin_amdgcn_fence(__ATOMIC_SEQ_CST, "");
 }
+#endif
 
 #if defined(__SPVCPU__)
-// SPIR-V control barrier, implemented by the Native CPU device library.
-__device__ __attribute__((convergent)) void __spirv_ControlBarrier(int Execution, int Memory,
-                                                                   int Semantics);
-
-// SPIR-V Scope and MemorySemantics operand values.
-#define __HIP_SPIRV_SCOPE_WORKGROUP 2
-#define __HIP_SPIRV_SEQUENTIALLY_CONSISTENT 0x10
-#define __HIP_SPIRV_WORKGROUP_MEMORY 0x100
-#define __HIP_SPIRV_CROSS_WORKGROUP_MEMORY 0x200
-
 __device__ inline static void __work_group_barrier(__cl_mem_fence_flags flags) {
   int semantics = __HIP_SPIRV_SEQUENTIALLY_CONSISTENT;
   if (flags & __CLK_LOCAL_MEM_FENCE) semantics |= __HIP_SPIRV_WORKGROUP_MEMORY;
