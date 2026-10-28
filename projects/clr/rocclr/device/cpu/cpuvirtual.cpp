@@ -81,8 +81,7 @@ class BlitManager final : public device::HostBlitManager {
   }
 };
 
-VirtualDevice::VirtualDevice(Device& device)
-    : device::VirtualDevice(device), dev_(device) {
+VirtualDevice::VirtualDevice(Device& device) : device::VirtualDevice(device), dev_(device) {
   blitMgr_ = new BlitManager(*this);
   LogPrintfInfo("CPU VirtualDevice created: virtual=%p device=%p", this, &device);
 }
@@ -270,8 +269,8 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
       if (hostMemory != nullptr) {
         amd::Coord3D srcOrigin(offset);
         result = blitMgr().copyBufferToImage(*hostMemory, *devMem, srcOrigin, cmd.origin(), size,
-                                             cmd.isEntireMemory(), cmd.rowPitch(),
-                                             cmd.slicePitch(), cmd.copyMetadata());
+                                             cmd.isEntireMemory(), cmd.rowPitch(), cmd.slicePitch(),
+                                             cmd.copyMetadata());
       } else {
         result = blitMgr().writeImage(src, *devMem, cmd.origin(), size, cmd.rowPitch(),
                                       cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
@@ -343,8 +342,8 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
     }
     case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
       result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                            cmd.size(), entire, cmd.srcRect().rowPitch_,
-                                            cmd.srcRect().slicePitch_, cmd.copyMetadata());
+                                           cmd.size(), entire, cmd.srcRect().rowPitch_,
+                                           cmd.srcRect().slicePitch_, cmd.copyMetadata());
       break;
     }
     default:
@@ -427,16 +426,6 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
       "CPU VirtualDevice::submitKernel reached: command=%p kernel=%p name=%s parameters=%p "
       "status=%d",
       &cmd, &kernel, kernel.name().c_str(), cmd.parameters(), cmd.status());
-  LogPrintfInfo(
-      "CPU VirtualDevice::submitKernel ndrange: dims=%zu offset={%zu,%zu,%zu} "
-      "global={%zu,%zu,%zu} local={%zu,%zu,%zu} sharedMem=%zu",
-      sizes.dimensions(), off[0], off[1], off[2], gws[0], gws[1], gws[2], lws[0], lws[1], lws[2],
-      cmd.sharedMemBytes());
-  LogPrintfInfo(
-      "CPU VirtualDevice::submitKernel kernel info: devKernel=%p params=%u paramsSize=%zu "
-      "wgSize=%zu",
-      devKernel, kernel.signature().numParameters(), kernel.signature().paramsSize(),
-      devKernel != nullptr ? devKernel->workGroupInfo()->size_ : 0);
 
   const amd::KernelSignature& signature = kernel.signature();
   for (uint32_t i = 0; i < signature.numParameters(); ++i) {
@@ -479,23 +468,45 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
                 reinterpret_cast<void*>(hostKernel->entry()), state.num_groups[0],
                 state.num_groups[1], state.num_groups[2]);
 
-  // Set the dynamic shared memory size before the work-groups are dispatched.
-  if (hostKernel->dynamicSharedSetter() != nullptr) {
-    hostKernel->dynamicSharedSetter()(static_cast<uint64_t>(cmd.sharedMemBytes()));
-  }
+  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
 
-  // One dispatch call per work-group. The work-group function iterates the work
-  // items.
-  for (size_t z = 0; z < state.num_groups[2]; ++z) {
-    for (size_t y = 0; y < state.num_groups[1]; ++y) {
-      for (size_t x = 0; x < state.num_groups[0]; ++x) {
-        state.workgroup_id[0] = x;
-        state.workgroup_id[1] = y;
-        state.workgroup_id[2] = z;
-        hostKernel->entry()(args.data(), &state);
-      }
+  // The workers divide the flattened group list into contiguous blocks.
+  const Subhandler entry = hostKernel->entry();
+  const SetDynamicSharedMemBytes setter = hostKernel->dynamicSharedSetter();
+  const uint64_t sharedMemBytes = static_cast<uint64_t>(cmd.sharedMemBytes());
+  const size_t numGroups[3] = {state.num_groups[0], state.num_groups[1], state.num_groups[2]};
+  const size_t totalGroups = numGroups[0] * numGroups[1] * numGroups[2];
+
+  dev_.threadPool().run([&](size_t tid, size_t numThreads) {
+    NativeCpuState threadState = state;
+
+    // Set the dynamic shared memory size before the work-groups are dispatched.
+    if (setter != nullptr) {
+      setter(sharedMemBytes);
     }
-  }
+
+    // Each worker gets the same number of groups, or one more. The extra
+    // groups go to the last workers.
+    const size_t groupsPerWorker = totalGroups / numThreads;
+    const size_t remainder = totalGroups % numThreads;
+    const size_t smallWorkers = numThreads - remainder;
+    const bool isLarge = (tid >= smallWorkers);
+    const size_t begin =
+        isLarge ? smallWorkers * groupsPerWorker + (tid - smallWorkers) * (groupsPerWorker + 1)
+                : tid * groupsPerWorker;
+    const size_t count = isLarge ? groupsPerWorker + 1 : groupsPerWorker;
+    const size_t end = begin + count;
+
+    // One dispatch call per work-group. The work-group function iterates the
+    // work items.
+    for (size_t group = begin; group < end; ++group) {
+      threadState.workgroup_id[0] = group % numGroups[0];
+      const size_t groupRow = group / numGroups[0];
+      threadState.workgroup_id[1] = groupRow % numGroups[1];
+      threadState.workgroup_id[2] = groupRow / numGroups[1];
+      entry(args.data(), &threadState);
+    }
+  });
 
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
 }

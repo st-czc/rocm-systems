@@ -13,6 +13,7 @@
 
 #include "cpukernel.hpp"
 #include "cpumemory.hpp"
+#include "cputhreadpool.hpp"
 #include "cpuvirtual.hpp"
 
 #include <string>
@@ -201,6 +202,9 @@ class Device : public NullDevice {
     return static_cast<Memory*>(mem->getDeviceMemory(*this));
   }
 
+  //! Returns the launch thread pool shared by all virtual devices
+  ThreadPool& threadPool() const { return threadPool_; }
+
   virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
                          cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
                          void* svmPtr = nullptr) const override;
@@ -271,6 +275,9 @@ class Device : public NullDevice {
  private:
   //! Creates buffer backing with the requested system-memory alignment.
   Memory* createBufferMemory(amd::Memory& owner, size_t alignment) const;
+
+  //! The launch thread pool owned by this device
+  mutable ThreadPool threadPool_;
 
   //! Disable default copy constructor
   Device(const Device&);

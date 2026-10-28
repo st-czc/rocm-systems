@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace amd::cpu {
@@ -123,6 +124,11 @@ void Device::tearDown() { NullDevice::tearDown(); }
 bool Device::create(const amd::Isa& isa) {
   if (!NullDevice::create(isa)) {
     LogError("Unable to setup the host device!");
+    return false;
+  }
+
+  if (!threadPool_.start(std::thread::hardware_concurrency())) {
+    LogError("Unable to start the CPU thread pool!");
     return false;
   }
 
