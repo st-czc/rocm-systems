@@ -12,6 +12,7 @@
 #include "os/os.hpp"
 #include "utils/debug.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -499,12 +500,16 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
 
     // One dispatch call per work-group. The work-group function iterates the
     // work items.
-    for (size_t group = begin; group < end; ++group) {
-      threadState.workgroup_id[0] = group % numGroups[0];
+    // [HIPCPU x-range] One call runs a contiguous run of work-groups on
+    // dimension 0.
+    for (size_t group = begin; group < end;) {
+      const size_t xBegin = group % numGroups[0];
       const size_t groupRow = group / numGroups[0];
+      const size_t xEnd = xBegin + std::min(numGroups[0] - xBegin, end - group);
       threadState.workgroup_id[1] = groupRow % numGroups[1];
       threadState.workgroup_id[2] = groupRow / numGroups[1];
-      entry(args.data(), &threadState);
+      entry(args.data(), &threadState, xBegin, xEnd, static_cast<size_t>(sharedMemBytes));
+      group += xEnd - xBegin;
     }
   });
 
