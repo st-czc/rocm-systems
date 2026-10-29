@@ -473,18 +473,12 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
 
   // The workers divide the flattened group list into contiguous blocks.
   const Subhandler entry = hostKernel->entry();
-  const SetDynamicSharedMemBytes setter = hostKernel->dynamicSharedSetter();
-  const uint64_t sharedMemBytes = static_cast<uint64_t>(cmd.sharedMemBytes());
+  const size_t sharedMemBytes = static_cast<size_t>(cmd.sharedMemBytes());
   const size_t numGroups[3] = {state.num_groups[0], state.num_groups[1], state.num_groups[2]};
   const size_t totalGroups = numGroups[0] * numGroups[1] * numGroups[2];
 
   dev_.threadPool().run([&](size_t tid, size_t numThreads) {
     NativeCpuState threadState = state;
-
-    // Set the dynamic shared memory size before the work-groups are dispatched.
-    if (setter != nullptr) {
-      setter(sharedMemBytes);
-    }
 
     // Each worker gets the same number of groups, or one more. The extra
     // groups go to the last workers.
@@ -496,20 +490,28 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
         isLarge ? smallWorkers * groupsPerWorker + (tid - smallWorkers) * (groupsPerWorker + 1)
                 : tid * groupsPerWorker;
     const size_t count = isLarge ? groupsPerWorker + 1 : groupsPerWorker;
-    const size_t end = begin + count;
 
     // One dispatch call per work-group. The work-group function iterates the
     // work items.
     // [HIPCPU x-range] One call runs a contiguous run of work-groups on
     // dimension 0.
-    for (size_t group = begin; group < end;) {
-      const size_t xBegin = group % numGroups[0];
-      const size_t groupRow = group / numGroups[0];
-      const size_t xEnd = xBegin + std::min(numGroups[0] - xBegin, end - group);
-      threadState.workgroup_id[1] = groupRow % numGroups[1];
-      threadState.workgroup_id[2] = groupRow / numGroups[1];
-      entry(args.data(), &threadState, xBegin, xEnd, static_cast<size_t>(sharedMemBytes));
-      group += xEnd - xBegin;
+    size_t workgroup = begin;
+    size_t workgroup_end = workgroup + count;
+    size_t workgroup_id_x = workgroup % numGroups[0];
+    size_t workgroup_id_x_end =
+        std::min(numGroups[0], workgroup_id_x + (workgroup_end - workgroup));
+    threadState.workgroup_id[1] = (begin / numGroups[0]) % numGroups[1];
+    threadState.workgroup_id[2] = (begin / numGroups[0]) / numGroups[1];
+    while (workgroup_id_x < workgroup_id_x_end) {
+      entry(args.data(), &threadState, workgroup_id_x, workgroup_id_x_end, sharedMemBytes);
+      workgroup += workgroup_id_x_end - workgroup_id_x;
+      workgroup_id_x = 0;
+      workgroup_id_x_end = std::min(numGroups[0], workgroup_end - workgroup);
+      threadState.workgroup_id[1] += 1;
+      if (threadState.workgroup_id[1] == numGroups[1]) {
+        threadState.workgroup_id[1] = 0;
+        threadState.workgroup_id[2] += 1;
+      }
     }
   });
 

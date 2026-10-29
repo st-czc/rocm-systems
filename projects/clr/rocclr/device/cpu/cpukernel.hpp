@@ -42,9 +42,6 @@ struct NativeCpuState {
 using Subhandler = void (*)(void** args, NativeCpuState* state, size_t x_begin,
                             size_t x_end, size_t dynamicSharedMemBytes);
 
-//! Sets the dynamic shared memory size of a kernel before it is dispatched.
-using SetDynamicSharedMemBytes = void (*)(uint64_t);
-
 //! Host kernel handle. It carries the work-group metadata that the runtime
 //! queries.
 class Kernel : public device::Kernel {
@@ -60,18 +57,8 @@ class Kernel : public device::Kernel {
   void setEntry(Subhandler entry) { entry_ = entry; }
   Subhandler entry() const { return entry_; }
 
-  //! The setter resolved from the loaded device image. It is null when the
-  //! image does not use extern __shared__.
-  void setDynamicSharedSetter(SetDynamicSharedMemBytes setter) {
-    dynamicSharedSetter_ = setter;
-  }
-  SetDynamicSharedMemBytes dynamicSharedSetter() const {
-    return dynamicSharedSetter_;
-  }
-
  private:
   Subhandler entry_ = nullptr;
-  SetDynamicSharedMemBytes dynamicSharedSetter_ = nullptr;
 
   //! Disable default copy constructor
   Kernel(const Kernel&);

@@ -21,11 +21,6 @@ namespace amd::cpu {
 //! Suffix of the per-kernel subhandler exported by the Native CPU pipeline.
 static constexpr std::string_view kSubhandlerSuffix = ".SYCLNCPU";
 
-//! Name of the entry point that sets the dynamic shared memory size of a
-//! kernel.
-static constexpr std::string_view kDynamicSharedSetterName =
-    "__hipcpu_set_dynamic_shared_mem_bytes";
-
 //! ELF device image for this host. The fat binary marks it with the AMDGPU
 //! machine and the HSA OS ABI so the loader rejects it. The runtime removes the
 //! mark before it hands the image to the loader.
@@ -132,14 +127,13 @@ bool Program::markImage(std::vector<char>& image) {
 }
 
 void Program::repairImage(std::vector<char>& image) {
-  if (!savedElfHeader_.valid)
-    return;
+  if (!savedElfHeader_.valid) return;
   auto& osabi = reinterpret_cast<unsigned char&>(image[kOsAbiOffset]);
   osabi = savedElfHeader_.osabi;
   std::memcpy(image.data() + kMachineOffset, &savedElfHeader_.machine,
               sizeof(savedElfHeader_.machine));
-  LogPrintfInfo("CPU Program::repairImage: program=%p ei_osabi -> %u, e_machine -> %u",
-                this, savedElfHeader_.osabi, savedElfHeader_.machine);
+  LogPrintfInfo("CPU Program::repairImage: program=%p ei_osabi -> %u, e_machine -> %u", this,
+                savedElfHeader_.osabi, savedElfHeader_.machine);
 }
 
 void* Program::loadImage(void* binary, size_t binSize) {
@@ -179,19 +173,13 @@ void* Program::loadImage(void* binary, size_t binSize) {
 
 bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, size_t foffset,
                          std::string uri) {
-  LogPrintfInfo(
-      "CPU Program::setKernels: program=%p binary=%p size=%zu fdesc=%p offset=%zu uri=%s", this,
-      binary, binSize, reinterpret_cast<void*>(fdesc), foffset, uri.c_str());
+  LogPrintfInfo("CPU Program::setKernels: program=%p binary=%p size=%zu fdesc=%p offset=%zu uri=%s",
+                this, binary, binSize, reinterpret_cast<void*>(fdesc), foffset, uri.c_str());
 
   imageHandle_ = loadImage(binary, binSize);
   if (imageHandle_ == nullptr) {
     return false;
   }
-
-  // Resolve the setter once per image. It is null when the image does not use
-  // extern __shared__.
-  auto setter = reinterpret_cast<SetDynamicSharedMemBytes>(
-      amd::Os::getSymbol(imageHandle_, kDynamicSharedSetterName.data()));
 
   for (const auto& it : kernels()) {
     Kernel* kernel = static_cast<Kernel*>(it.second);
@@ -203,7 +191,6 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
       return false;
     }
     kernel->setEntry(entry);
-    kernel->setDynamicSharedSetter(setter);
     LogPrintfInfo("CPU Program::setKernels: program=%p kernel=%s entry=%s at %p", this,
                   kernel->name().c_str(), symbol.c_str(), reinterpret_cast<void*>(entry));
   }
