@@ -9,12 +9,14 @@
 #include "device/blit.hpp"
 #include "device/cpu/cpudevice.hpp"
 #include "device/cpu/cpukernel.hpp"
+#include "device/cpu/gridsync.hpp"
 #include "os/os.hpp"
 #include "utils/debug.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 namespace amd::cpu {
@@ -477,6 +479,12 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
   const size_t numGroups[3] = {state.num_groups[0], state.num_groups[1], state.num_groups[2]};
   const size_t totalGroups = numGroups[0] * numGroups[1] * numGroups[2];
 
+  if (cmd.cooperativeGroups()) {
+    runCooperativeGroups(entry, args, state, totalGroups, sharedMemBytes);
+    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    return;
+  }
+
   dev_.threadPool().run([&](size_t tid, size_t numThreads) {
     NativeCpuState threadState = state;
 
@@ -516,6 +524,29 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
   });
 
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+}
+
+void VirtualDevice::runCooperativeGroups(const Subhandler& entry, const std::vector<void*>& args,
+                                         const NativeCpuState& state, size_t groups,
+                                         size_t sharedMemBytes) {
+  GridSync grid(groups);
+  std::vector<std::thread> threads;
+  threads.reserve(groups);
+  for (size_t group = 0; group < groups; ++group) {
+    threads.emplace_back([&, group] {
+      setCurrentGridSync(&grid);
+      NativeCpuState threadState = state;
+      threadState.workgroup_id[0] = group % state.num_groups[0];
+      threadState.workgroup_id[1] = (group / state.num_groups[0]) % state.num_groups[1];
+      threadState.workgroup_id[2] = (group / state.num_groups[0]) / state.num_groups[1];
+      entry(const_cast<void**>(args.data()), &threadState, threadState.workgroup_id[0],
+            threadState.workgroup_id[0] + 1, sharedMemBytes);
+      setCurrentGridSync(nullptr);
+    });
+  }
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
 }
 
 void VirtualDevice::flush(amd::Command* list, bool) {

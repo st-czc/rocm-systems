@@ -7,9 +7,11 @@
 #ifndef CPUVIRTUAL_HPP_
 #define CPUVIRTUAL_HPP_
 
+#include "device/cpu/cpukernel.hpp"
 #include "device/device.hpp"
 
 #include <cstdint>
+#include <vector>
 
 //! CPU Device Implementation
 namespace amd::cpu {
@@ -83,6 +85,11 @@ class VirtualDevice : public device::VirtualDevice {
   }
 
  private:
+  //! Runs a cooperative launch with one thread per work-group, so that every
+  //! work-group is live while the kernel synchronizes across the grid.
+  void runCooperativeGroups(const Subhandler& entry, const std::vector<void*>& args,
+                            const NativeCpuState& state, size_t groups, size_t sharedMemBytes);
+
   //! Fills a memory object with a pattern
   bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
                   size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,

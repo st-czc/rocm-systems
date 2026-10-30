@@ -27,7 +27,16 @@ hipError_t ihipOccupancyMaxActiveBlocksPerMultiprocessor(
 
   const auto* wrkGrpInfo = kernel->getDeviceKernel(device)->workGroupInfo();
   const int maxWorkGroupSize = static_cast<int>(device.info().maxWorkGroupSize_);
-  
+
+  // The CPU device runs work-groups on host threads, so it has no ISA
+  // occupancy limit to report. Its ISA carries no version.
+  if (device.isa().versionMajor() == 0) {
+    *maxBlocksPerCU = INT_MAX;
+    *numBlocksPerGrid = INT_MAX;
+    *bestBlockSize = inputBlockSize;
+    return hipSuccess;
+  }
+
   if (!bCalcPotentialBlkSz) {
     if (inputBlockSize <= 0) {
       return hipErrorInvalidValue;

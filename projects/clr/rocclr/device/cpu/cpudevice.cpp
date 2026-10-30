@@ -265,9 +265,10 @@ void NullDevice::fillDeviceInfo() {
   info_.maxWorkGroupSize_ = 1024;
   info_.preferredWorkGroupSize_ = 256;
   info_.maxWorkItemDimensions_ = 3;
+  info_.cooperativeGroups_ = 1;
   for (size_t dim = 0; dim < 3; ++dim) {
     info_.maxWorkItemSizes_[dim] = 1024;
-    info_.maxGridDim_[dim] = UINT32_MAX;
+    info_.maxGridDim_[dim] = INT32_MAX;
   }
   info_.preferredVectorWidthChar_ = 1;
   info_.preferredVectorWidthShort_ = 1;

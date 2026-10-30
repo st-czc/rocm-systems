@@ -8,6 +8,7 @@
 
 #include "device/cpu/cpudevice.hpp"
 #include "device/cpu/cpukernel.hpp"
+#include "device/cpu/gridsync.hpp"
 #include "os/os.hpp"
 #include "utils/debug.hpp"
 
@@ -179,6 +180,10 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
   imageHandle_ = loadImage(binary, binSize);
   if (imageHandle_ == nullptr) {
     return false;
+  }
+
+  if (void** handle = gridSyncHandle(imageHandle_)) {
+    *handle = reinterpret_cast<void*>(&gridSyncEntry);
   }
 
   for (const auto& it : kernels()) {
