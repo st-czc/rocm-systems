@@ -150,6 +150,17 @@ extern int HIP_TRACE_API;
 #define __launch_bounds__(...)                                                                     \
   select_impl_(__VA_ARGS__, launch_bounds_impl1, launch_bounds_impl0, )(__VA_ARGS__)
 
+#define reqd_wgs_impl1(x) __attribute__((reqd_work_group_size(x, 1, 1)))
+#define reqd_wgs_impl2(x, y) __attribute__((reqd_work_group_size(x, y, 1)))
+#define reqd_wgs_impl3(x, y, z) __attribute__((reqd_work_group_size(x, y, z)))
+#define reqd_wgs_select_impl_(_1, _2, _3, impl_, ...) impl_
+#if __HIP_DEVICE_COMPILE__ && defined(__SPVCPU__)
+#define __reqd_work_group_size__(...)                                                              \
+  reqd_wgs_select_impl_(__VA_ARGS__, reqd_wgs_impl3, reqd_wgs_impl2, reqd_wgs_impl1, )(__VA_ARGS__)
+#else
+#define __reqd_work_group_size__(...)
+#endif
+
 #if !defined(__HIPCC_RTC__)
 __host__ inline void* __get_dynamicgroupbaseptr() { return nullptr; }
 #endif  // !defined(__HIPCC_RTC__)
