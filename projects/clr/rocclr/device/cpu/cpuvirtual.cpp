@@ -119,6 +119,7 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
   }
 
   cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
 
   switch (type) {
     case CL_COMMAND_READ_BUFFER: {
@@ -179,6 +180,8 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
     LogError("submitReadMemory failed!");
     cmd.setStatus(CL_OUT_OF_RESOURCES);
   } else {
+    LogPrintfInfo("CPU VirtualDevice::submitReadMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
     cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
   }
   // profilingEnd();
@@ -218,6 +221,7 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
   }
 
   cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
 
   switch (type) {
     case CL_COMMAND_WRITE_BUFFER: {
@@ -286,6 +290,8 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
     cmd.setStatus(CL_OUT_OF_RESOURCES);
   } else {
     cmd.destination().signalWrite(&dev_);
+    LogPrintfInfo("CPU VirtualDevice::submitWriteMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
     cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
   }
   // profilingEnd();
@@ -316,6 +322,7 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   srcDevMem->syncCacheFromHost(*this);
 
   cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
 
   switch (type) {
     case CL_COMMAND_SVM_MEMCPY:
@@ -355,6 +362,8 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
     cmd.setStatus(CL_INVALID_OPERATION);
   } else {
     cmd.destination().signalWrite(&dev_);
+    LogPrintfInfo("CPU VirtualDevice::submitCopyMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
     cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
   }
   // profilingEnd();
@@ -405,9 +414,16 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
 
   // profilingBegin(cmd, true);
 
+  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
+
   if (!fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
                   cmd.origin(), cmd.size())) {
     cmd.setStatus(CL_INVALID_OPERATION);
+  } else {
+    LogPrintfInfo("CPU VirtualDevice::submitFillMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
   }
   // profilingEnd();
 }
@@ -469,6 +485,7 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
                 state.num_groups[1], state.num_groups[2]);
 
   cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
 
   // The workers divide the flattened group list into contiguous blocks.
   const Subhandler entry = hostKernel->entry();
@@ -496,6 +513,8 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
     entry(args.data(), &threadState, begin, begin + count, sharedMemBytes);
   });
 
+  LogPrintfInfo("CPU VirtualDevice::submitKernel: %llu ns",
+                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
 }
 
