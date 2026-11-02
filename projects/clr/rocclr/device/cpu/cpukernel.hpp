@@ -35,12 +35,13 @@ struct NativeCpuState {
   uint32_t sub_group_size;
 };
 
-//! Per-kernel subhandler. It takes one pointer per argument and the work-group
-//! state, and it runs one work-group per call.
-//! [HIPCPU x-range] It also takes the dimension-0 work-group range to run and
-//! the dynamic shared memory size; one call runs that range.
-using Subhandler = void (*)(void** args, NativeCpuState* state, size_t x_begin,
-                            size_t x_end, size_t dynamicSharedMemBytes);
+//! Per-kernel subhandler. It takes one pointer per argument, the work-group
+//! state, the flat work-group range that the call runs, and the dynamic shared
+//! memory size. The range is non-empty, and the subhandler sets the work-group
+//! id of every work-group in it.
+using Subhandler = void (*)(void** args, NativeCpuState* state,
+                            size_t group_begin, size_t group_end,
+                            size_t dynamicSharedMemBytes);
 
 //! Host kernel handle. It carries the work-group metadata that the runtime
 //! queries.

@@ -12,7 +12,6 @@
 #include "os/os.hpp"
 #include "utils/debug.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -491,28 +490,10 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
                 : tid * groupsPerWorker;
     const size_t count = isLarge ? groupsPerWorker + 1 : groupsPerWorker;
 
-    // One dispatch call per work-group. The work-group function iterates the
-    // work items.
-    // [HIPCPU x-range] One call runs a contiguous run of work-groups on
-    // dimension 0.
-    size_t workgroup = begin;
-    size_t workgroup_end = workgroup + count;
-    size_t workgroup_id_x = workgroup % numGroups[0];
-    size_t workgroup_id_x_end =
-        std::min(numGroups[0], workgroup_id_x + (workgroup_end - workgroup));
-    threadState.workgroup_id[1] = (begin / numGroups[0]) % numGroups[1];
-    threadState.workgroup_id[2] = (begin / numGroups[0]) / numGroups[1];
-    while (workgroup_id_x < workgroup_id_x_end) {
-      entry(args.data(), &threadState, workgroup_id_x, workgroup_id_x_end, sharedMemBytes);
-      workgroup += workgroup_id_x_end - workgroup_id_x;
-      workgroup_id_x = 0;
-      workgroup_id_x_end = std::min(numGroups[0], workgroup_end - workgroup);
-      threadState.workgroup_id[1] += 1;
-      if (threadState.workgroup_id[1] == numGroups[1]) {
-        threadState.workgroup_id[1] = 0;
-        threadState.workgroup_id[2] += 1;
-      }
-    }
+    // The subhandler expects a non-empty group range.
+    if (count == 0) return;
+
+    entry(args.data(), &threadState, begin, begin + count, sharedMemBytes);
   });
 
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
