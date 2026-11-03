@@ -255,7 +255,7 @@ std::pair<const Isa*, const Isa*> Isa::supportedIsas() {
       {"gfx12-5-generic", true, true, 12, 5, 0, NONE, NONE, 4, 32, 1, 256, 320* Ki, 64, 1024},
 #if defined(WITH_CPU_DEVICE)
       // Host CPU target.
-      {"spvcpu", false, false, 0, 0, 0, NONE, NONE, 1, 1, 1, 0, 0, 1, 1},
+      {"spvcpu", false, false, 8, 0, 0, NONE, NONE, 1, 1, 1, 0, 0, 1, 1},
 #endif  // WITH_CPU_DEVICE
   };
   return std::make_pair(std::begin(supportedIsas_), std::end(supportedIsas_));

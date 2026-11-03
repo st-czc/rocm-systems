@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -36,6 +37,27 @@ const amd::Isa* findHostIsa() {
     }
   }
   return nullptr;
+}
+
+//! Returns the memory the host can hand out without swapping, in bytes.
+bool hostAvailableMemory(uint64_t& available) {
+  FILE* meminfo = ::fopen("/proc/meminfo", "r");
+  if (meminfo == nullptr) {
+    return false;
+  }
+
+  char line[256];
+  bool found = false;
+  while (::fgets(line, sizeof(line), meminfo) != nullptr) {
+    unsigned long long kib = 0;
+    if (::sscanf(line, "MemAvailable: %llu kB", &kib) == 1) {
+      available = static_cast<uint64_t>(kib) * Ki;
+      found = true;
+      break;
+    }
+  }
+  ::fclose(meminfo);
+  return found;
 }
 
 }  // namespace
@@ -240,6 +262,21 @@ void Device::svmFree(void* ptr) const {
     amd::MemObjMap::RemoveMemObj(mem->getSvmPtr());
     mem->release();
   }
+}
+
+bool Device::globalFreeMemory(size_t* freeMemory) const {
+  constexpr size_t kTotalFreeMemory = 0;
+  constexpr size_t kLargestFreeBlock = 1;
+
+  uint64_t available = info_.globalMemSize_;
+  uint64_t hostAvailable;
+  if (hostAvailableMemory(hostAvailable)) {
+    available = std::min(hostAvailable, info_.globalMemSize_);
+  }
+
+  freeMemory[kTotalFreeMemory] = static_cast<size_t>(available / Ki);
+  freeMemory[kLargestFreeBlock] = freeMemory[kTotalFreeMemory];
+  return true;
 }
 
 void NullDevice::fillDeviceInfo() {

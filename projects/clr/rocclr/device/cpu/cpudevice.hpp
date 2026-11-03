@@ -228,7 +228,7 @@ class Device : public NullDevice {
     return true;
   }
 
-  virtual bool globalFreeMemory(size_t* freeMemory) const override { return false; }
+  virtual bool globalFreeMemory(size_t* freeMemory) const override;
 
   virtual void* virtualAlloc(void* addr, size_t size, size_t alignment) override {
     return nullptr;
