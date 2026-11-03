@@ -257,22 +257,22 @@ typedef struct dim3 {
 
 #if defined(__SPVCPU__)
 // SPIR-V work-item queries, implemented by the Native CPU device library.
-__device__ __attribute__((const)) size_t __spirv_BuiltInLocalInvocationId(int);
+__device__ __attribute__((const, noconvergent)) size_t __spirv_BuiltInLocalInvocationId(int);
 __DEVICE__ unsigned int __hip_get_thread_idx_x() { return __spirv_BuiltInLocalInvocationId(0); }
 __DEVICE__ unsigned int __hip_get_thread_idx_y() { return __spirv_BuiltInLocalInvocationId(1); }
 __DEVICE__ unsigned int __hip_get_thread_idx_z() { return __spirv_BuiltInLocalInvocationId(2); }
 
-__device__ __attribute__((const)) size_t __spirv_BuiltInWorkgroupId(int);
+__device__ __attribute__((const, noconvergent)) size_t __spirv_BuiltInWorkgroupId(int);
 __DEVICE__ unsigned int __hip_get_block_idx_x() { return __spirv_BuiltInWorkgroupId(0); }
 __DEVICE__ unsigned int __hip_get_block_idx_y() { return __spirv_BuiltInWorkgroupId(1); }
 __DEVICE__ unsigned int __hip_get_block_idx_z() { return __spirv_BuiltInWorkgroupId(2); }
 
-__device__ __attribute__((const)) size_t __spirv_BuiltInWorkgroupSize(int);
+__device__ __attribute__((const, noconvergent)) size_t __spirv_BuiltInWorkgroupSize(int);
 __DEVICE__ unsigned int __hip_get_block_dim_x() { return __spirv_BuiltInWorkgroupSize(0); }
 __DEVICE__ unsigned int __hip_get_block_dim_y() { return __spirv_BuiltInWorkgroupSize(1); }
 __DEVICE__ unsigned int __hip_get_block_dim_z() { return __spirv_BuiltInWorkgroupSize(2); }
 
-__device__ __attribute__((const)) size_t __spirv_BuiltInNumWorkgroups(int);
+__device__ __attribute__((const, noconvergent)) size_t __spirv_BuiltInNumWorkgroups(int);
 __DEVICE__ unsigned int __hip_get_grid_dim_x() { return __spirv_BuiltInNumWorkgroups(0); }
 __DEVICE__ unsigned int __hip_get_grid_dim_y() { return __spirv_BuiltInNumWorkgroups(1); }
 __DEVICE__ unsigned int __hip_get_grid_dim_z() { return __spirv_BuiltInNumWorkgroups(2); }
