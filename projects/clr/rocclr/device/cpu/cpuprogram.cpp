@@ -8,7 +8,9 @@
 
 #include "device/cpu/cpudevice.hpp"
 #include "device/cpu/cpukernel.hpp"
+#include "elf/elf.hpp"
 #include "os/os.hpp"
+#include "platform/memory.hpp"
 #include "utils/debug.hpp"
 
 #include <cstdio>
@@ -181,6 +183,8 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
     return false;
   }
 
+  findGlobalVarSizes();
+
   for (const auto& it : kernels()) {
     Kernel* kernel = static_cast<Kernel*>(it.second);
     const std::string symbol = kernel->name() + std::string(kSubhandlerSuffix);
@@ -204,6 +208,81 @@ bool Program::createBinary(amd::option::Options* options) {
   // The host backend does not build device code.
   LogPrintfError("CPU Program::createBinary rejected: program=%p options=%p", this, options);
   return false;
+}
+
+void Program::findGlobalVarSizes() {
+  if (image_.empty()) {
+    return;
+  }
+
+  amd::Elf elfIn(ELFCLASSNONE, image_.data(), image_.size(), nullptr, amd::Elf::ELF_C_READ);
+  if (!elfIn.isSuccessful()) {
+    LogPrintfError("CPU Program::findGlobalVarSizes: program=%p cannot read the device image", this);
+    return;
+  }
+
+  for (unsigned int i = 0; i < elfIn.getSymbolNum(); ++i) {
+    amd::Elf::SymbolInfo info;
+    if (!elfIn.getSymbolInfo(i, &info)) {
+      continue;
+    }
+    // Kernels live in .text and the rest of the image metadata is not a device
+    // variable. Only the data sections carry the globals the host can query.
+    if (info.sec_name == ".text" || info.size == 0) {
+      continue;
+    }
+    globalVarSizes_[info.sym_name] = info.size;
+  }
+
+  LogPrintfInfo("CPU Program::findGlobalVarSizes: program=%p globals=%zu", this,
+                globalVarSizes_.size());
+}
+
+bool Program::createGlobalVarObj(amd::Memory** amd_mem_obj, void** dptr, size_t* bytes,
+                                 const char* globalName) const {
+  if (!device().isOnline()) {
+    return false;
+  }
+
+  const auto sizeIt = globalVarSizes_.find(globalName);
+  if (sizeIt == globalVarSizes_.end()) {
+    buildLog_ += "Error: Failed to find the global variable: ";
+    buildLog_ += globalName;
+    buildLog_ += "\n";
+    return false;
+  }
+  const size_t size = sizeIt->second;
+  *bytes = size;
+
+  // Handle size 0 symbols
+  if (size == 0) {
+    return true;
+  }
+
+  void* device_ptr = amd::Os::getSymbol(imageHandle_, globalName);
+  if (device_ptr == nullptr) {
+    buildLog_ += "Error: Failed to find the global variable address: ";
+    buildLog_ += globalName;
+    buildLog_ += "\n";
+    return false;
+  }
+
+  *dptr = device_ptr;
+  *amd_mem_obj =
+      new (device().context()) amd::Buffer(device().context(), ROCCLR_MEM_INTERNAL_MEMORY, size,
+                                           device_ptr);
+  if (*amd_mem_obj == nullptr) {
+    buildLog_ += "[CPU] Failed to create a mem object!\n";
+    return false;
+  }
+  if (!(*amd_mem_obj)->create(nullptr)) {
+    buildLog_ += "[CPU] failed to create a svm hidden buffer!\n";
+    (*amd_mem_obj)->release();
+    *amd_mem_obj = nullptr;
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace amd::cpu

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "device/devkernel.hpp"
@@ -25,6 +26,10 @@ class Program : public device::Program {
 
   //! Default destructor
   virtual ~Program();
+
+  //! Wraps a device global in an internal memory object.
+  bool createGlobalVarObj(amd::Memory** amd_mem_obj, void** dptr, size_t* bytes,
+                          const char* globalName) const override;
 
  protected:
   //! Collects the kernel entry points the device image exports.
@@ -54,8 +59,14 @@ class Program : public device::Program {
   //! Makes the in-memory device image loadable and returns its dlopen handle.
   void* loadImage(void* binary, size_t binSize);
 
+  //! Records the size of every global the device image defines.
+  void findGlobalVarSizes();
+
   //! The dlopen handle of the device image, owned by this program.
   void* imageHandle_ = nullptr;
+
+  //! Size of each global in the device image, keyed by symbol name.
+  std::unordered_map<std::string, size_t> globalVarSizes_;
 
   //! Marked copy of the device image, owned by the program while ClBinary points
   //! to it.
