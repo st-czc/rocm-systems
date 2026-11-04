@@ -211,11 +211,13 @@ Image::Image(const Device& dev, amd::Memory& owner) : Memory(dev, owner) {
 
   const uint64_t base = virtualAddress();
   const size_t elementSize = image->getImageFormat().getElementSize();
-  const size_t numRecords = image->getWidth();
+  const bool is2D = image->getDims() > 1;
+  const size_t stride = is2D ? image->getRowPitch() : elementSize;
+  const size_t records = is2D ? image->getHeight() : image->getWidth();
 
   srd_[0] = static_cast<uint32_t>(base);
-  srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(elementSize) << 16);
-  srd_[2] = static_cast<uint32_t>(numRecords);
+  srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(stride) << 16);
+  srd_[2] = static_cast<uint32_t>(records);
   srd_[3] = getSrdFormat(*image);
 }
 

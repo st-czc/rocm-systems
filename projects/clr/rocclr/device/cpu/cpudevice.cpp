@@ -255,30 +255,30 @@ Sampler::Sampler() : device::Sampler() {
   hwState_ = reinterpret_cast<address>(state_);
 }
 
-bool Sampler::create(const amd::Sampler& owner) {
-  // gfx9 S# subset: clamp in DW0[2:0], force-unnormalized in DW0[15],
-  // mag/min filter in DW1[1:0] and DW1[3:2].
-  uint32_t clamp = 0;
-  switch (owner.addressingMode(0)) {
+static uint32_t samplerClamp(uint32_t mode) {
+  switch (mode) {
     case CL_ADDRESS_REPEAT:
-      clamp = 0;
-      break;
+      return 0;
     case CL_ADDRESS_MIRRORED_REPEAT:
-      clamp = 1;
-      break;
+      return 1;
     case CL_ADDRESS_CLAMP_TO_EDGE:
-      clamp = 2;
-      break;
+      return 2;
     case CL_ADDRESS_CLAMP:
-      clamp = 4;
-      break;
+      return 4;
     default:
-      break;
+      return 0;
   }
+}
+
+bool Sampler::create(const amd::Sampler& owner) {
+  // gfx9 S# subset: clamp U/V/W in DW0[2:0]/[5:3]/[8:6], force-unnormalized
+  // in DW0[15], mag/min filter in DW1[1:0] and DW1[3:2].
+  state_[0] = samplerClamp(owner.addressingMode(0)) |
+              (samplerClamp(owner.addressingMode(1)) << 3) |
+              (samplerClamp(owner.addressingMode(2)) << 6);
+  state_[0] |= owner.normalizedCoords() ? 0u : (1u << 15);
 
   const uint32_t filter = (owner.filterMode() == CL_FILTER_LINEAR) ? 1u : 0u;
-  state_[0] = clamp;
-  state_[0] |= owner.normalizedCoords() ? 0u : (1u << 15);
   state_[1] = filter | (filter << 2);
   return true;
 }
@@ -412,6 +412,7 @@ void NullDevice::fillDeviceInfo() {
   info_.imagePitchAlignment_ = 256;
   info_.imageBaseAddressAlignment_ = 256;
   info_.image2DMaxWidth_ = 16384;
+  info_.image2DMaxHeight_ = 16384;
 
   // Offline targets cannot allocate or execute.
   info_.svmCapabilities_ = 0;
