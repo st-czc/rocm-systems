@@ -75,8 +75,12 @@ bool Memory::allocate(size_t size, size_t alignment) {
     return false;
   }
 
+  // HIP guarantees that device allocations are aligned to at least 256 bytes.
+  constexpr size_t kDeviceAllocationAlignment = 256;
+
   // posix_memalign requires a nonzero power-of-two multiple of sizeof(void*).
   alignment = std::max(alignment, static_cast<size_t>(dev_.info().memBaseAddrAlign_));
+  alignment = std::max(alignment, kDeviceAllocationAlignment);
   alignment = std::max(alignment, sizeof(void*));
   if ((alignment & (alignment - 1)) != 0) {
     LogError("CPU memory alignment must be a power of two!");
