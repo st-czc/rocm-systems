@@ -106,4 +106,21 @@ void Memory::release() {
   ownership_ = StorageOwnership::Borrowed;
 }
 
+Image::Image(const Device& dev, amd::Memory& owner) : Memory(dev, owner) {
+  std::memset(srd_, 0, sizeof(srd_));
+
+  const amd::Image* image = owner.asImage();
+  if (image == nullptr) {
+    return;
+  }
+
+  const uint64_t base = virtualAddress();
+  const size_t elementSize = image->getImageFormat().getElementSize();
+  const size_t numRecords = image->getWidth();
+
+  srd_[0] = static_cast<uint32_t>(base);
+  srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(elementSize) << 16);
+  srd_[2] = static_cast<uint32_t>(numRecords);
+}
+
 }  // namespace amd::cpu

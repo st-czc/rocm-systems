@@ -164,6 +164,10 @@ bool Device::create(const amd::Isa& isa) {
   info_.svmCapabilities_ |= CL_DEVICE_SVM_FINE_GRAIN_SYSTEM;
   info_.svmCapabilities_ |= CL_DEVICE_SVM_ATOMICS;
 
+  // Buffer-backed 1D textures only.
+  info_.imageSupport_ = 1;
+  info_.imageMaxBufferSize_ = 1 << 27;
+
   std::vector<amd::Device*> devices{this};
   context_ = new amd::Context(devices, amd::Context::Info());
   if (context_ == nullptr) {
@@ -182,7 +186,15 @@ device::Program* NullDevice::createProgram(amd::Program& owner, amd::option::Opt
 }
 
 device::Memory* Device::createMemory(amd::Memory& owner) const {
+  if (owner.asImage() != nullptr) {
+    return createImageMemory(owner);
+  }
   return createBufferMemory(owner, owner.getAlignment());
+}
+
+bool Device::createSampler(const amd::Sampler&, device::Sampler** sampler) const {
+  *sampler = new Sampler();
+  return *sampler != nullptr;
 }
 
 Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
@@ -213,6 +225,21 @@ Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
     std::memcpy(reinterpret_cast<void*>(memory->virtualAddress()), pipeInit, sizeof(pipeInit));
   }
   return memory;
+}
+
+Image* Device::createImageMemory(amd::Memory& owner) const {
+  Image* image = new Image(*this, owner);
+  if (image == nullptr || !image->isValid()) {
+    LogError("Failed creating CPU image memory!");
+    delete image;
+    return nullptr;
+  }
+  return image;
+}
+
+Sampler::Sampler() : device::Sampler() {
+  std::memset(state_, 0, sizeof(state_));
+  hwState_ = reinterpret_cast<address>(state_);
 }
 
 void* Device::svmAlloc(amd::Context& context, size_t size, size_t alignment,
