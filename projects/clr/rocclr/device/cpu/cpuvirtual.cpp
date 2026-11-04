@@ -369,6 +369,99 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   // profilingEnd();
 }
 
+void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  const auto& copyOps = cmd.copyOps();
+  if (copyOps.empty()) {
+    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    return;
+  }
+
+  // Synchronize source and destination memory
+  device::Memory::SyncFlags syncFlags;
+  syncFlags.skipEntire_ = false;
+  for (const auto& op : copyOps) {
+    Memory* srcDevMem = static_cast<Memory*>(op.srcMemory->getDeviceMemory(dev_, false));
+    Memory* dstDevMem = static_cast<Memory*>(op.dstMemory->getDeviceMemory(dev_, false));
+    if (srcDevMem == nullptr || dstDevMem == nullptr) {
+      LogError("submitBatchCopyMemory: Invalid memory objects!");
+      cmd.setStatus(CL_INVALID_MEM_OBJECT);
+      return;
+    }
+    dstDevMem->syncCacheFromHost(*this, syncFlags);
+    srcDevMem->syncCacheFromHost(*this);
+  }
+
+  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
+
+  if (!blitMgr().copyBufferBatch(copyOps)) {
+    LogError("submitBatchCopyMemory failed!");
+    cmd.setStatus(CL_OUT_OF_RESOURCES);
+    return;
+  }
+
+  for (const auto& op : copyOps) {
+    op.dstMemory->signalWrite(&dev_);
+  }
+  LogPrintfInfo("CPU VirtualDevice::submitBatchCopyMemory: %llu ns",
+                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+}
+
+void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  const std::vector<amd::BatchWriteMemoryOp>& writeOps = cmd.WriteOps();
+  if (writeOps.empty()) {
+    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    return;
+  }
+
+  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
+
+  if (!blitMgr().WriteBufferBatch(writeOps)) {
+    LogError("SubmitBatchWriteMemory: Batch write failed!");
+    cmd.setStatus(CL_OUT_OF_RESOURCES);
+    return;
+  }
+
+  for (const auto& op : writeOps) {
+    op.dst_memory->signalWrite(&dev_);
+  }
+  LogPrintfInfo("CPU VirtualDevice::SubmitBatchWriteMemory: %llu ns",
+                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+}
+
+void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  const std::vector<amd::BatchReadMemoryOp>& readOps = cmd.ReadOps();
+  if (readOps.empty()) {
+    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    return;
+  }
+
+  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
+  const uint64_t startTime = amd::Os::timeNanos();
+
+  if (!blitMgr().ReadBufferBatch(readOps)) {
+    LogError("SubmitBatchReadMemory: Batch read failed!");
+    cmd.setStatus(CL_OUT_OF_RESOURCES);
+    return;
+  }
+
+  LogPrintfInfo("CPU VirtualDevice::SubmitBatchReadMemory: %llu ns",
+                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+}
+
 bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
                                size_t patternSize, const amd::Coord3D& surface,
                                const amd::Coord3D& origin, const amd::Coord3D& size) {

@@ -36,15 +36,9 @@ class VirtualDevice : public device::VirtualDevice {
   virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd);
   virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd);
   virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) { Unsupported("CopyMemoryP2P"); }
-  virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
-    Unsupported("BatchCopyMemory");
-  }
-  virtual void SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
-    Unsupported("BatchWriteMemory");
-  }
-  virtual void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
-    Unsupported("BatchReadMemory");
-  }
+  virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd);
+  virtual void SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd);
+  virtual void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd);
   virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { Unsupported("MapMemory"); }
   virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) { Unsupported("UnmapMemory"); }
   virtual void submitKernel(amd::NDRangeKernelCommand& cmd);
