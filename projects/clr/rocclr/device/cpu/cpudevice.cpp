@@ -413,6 +413,9 @@ void NullDevice::fillDeviceInfo() {
   info_.imageBaseAddressAlignment_ = 256;
   info_.image2DMaxWidth_ = 16384;
   info_.image2DMaxHeight_ = 16384;
+  info_.image3DMaxWidth_ = 16384;
+  info_.image3DMaxHeight_ = 16384;
+  info_.image3DMaxDepth_ = 8192;
 
   // Offline targets cannot allocate or execute.
   info_.svmCapabilities_ = 0;

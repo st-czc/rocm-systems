@@ -12,14 +12,15 @@
 
 #include <algorithm>
 #include <cstring>
+#include <tuple>
 
 namespace amd::cpu {
 
 namespace {
 
-// Buffer resource descriptor (V#) DW3: DST_SEL[7:0], NUM_FORMAT[10:8],
-// DATA_FORMAT[15:12].
-uint32_t getSrdFormat(const amd::Image& image) {
+// Channel format fields shared by the buffer resource descriptor (V#) and the
+// image resource descriptor (T#). Returns {dstSel, dataFormat, numFormat}.
+std::tuple<uint32_t, uint32_t, uint32_t> getSrdFormat(const amd::Image& image) {
   const cl_image_format& format = image.getImageFormat();
 
   uint32_t channels = 0;
@@ -34,7 +35,7 @@ uint32_t getSrdFormat(const amd::Image& image) {
       channels = 4;
       break;
     default:
-      return 0;
+      return {};
   }
 
   uint32_t numFormat = 0;
@@ -62,7 +63,7 @@ uint32_t getSrdFormat(const amd::Image& image) {
       numFormat = 7;
       break;
     default:
-      return 0;
+      return {};
   }
 
   uint32_t bits = 0;
@@ -105,7 +106,7 @@ uint32_t getSrdFormat(const amd::Image& image) {
     dstSel |= 3u << 6;
   }
 
-  return dstSel | (numFormat << 8) | (dataFormat << 12);
+  return {dstSel, dataFormat, numFormat};
 }
 
 }  // namespace
@@ -210,15 +211,48 @@ Image::Image(const Device& dev, amd::Memory& owner) : Memory(dev, owner) {
   }
 
   const uint64_t base = virtualAddress();
-  const size_t elementSize = image->getImageFormat().getElementSize();
-  const bool is2D = image->getDims() > 1;
-  const size_t stride = is2D ? image->getRowPitch() : elementSize;
-  const size_t records = is2D ? image->getHeight() : image->getWidth();
+  const auto [dstSel, dataFormat, numFormat] = getSrdFormat(*image);
+
+  if (image->getType() == CL_MEM_OBJECT_IMAGE1D_BUFFER) {
+    const size_t elementSize = image->getImageFormat().getElementSize();
+    srd_[0] = static_cast<uint32_t>(base);
+    srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(elementSize) << 16);
+    srd_[2] = static_cast<uint32_t>(image->getWidth());
+    srd_[3] = dstSel | (numFormat << 8) | (dataFormat << 12);
+    return;
+  }
+
+  uint32_t type = 0x8;
+  switch (image->getType()) {
+    case CL_MEM_OBJECT_IMAGE2D:
+      type = 0x9;
+      break;
+    case CL_MEM_OBJECT_IMAGE3D:
+      type = 0xa;
+      break;
+    case CL_MEM_OBJECT_IMAGE1D_ARRAY:
+      type = 0xc;
+      break;
+    case CL_MEM_OBJECT_IMAGE2D_ARRAY:
+      type = 0xd;
+      break;
+    default:
+      break;
+  }
+
+  const uint32_t width = static_cast<uint32_t>(image->getWidth());
+  const uint32_t height = static_cast<uint32_t>(image->getHeight());
+  const uint32_t depth = static_cast<uint32_t>(image->getDepth());
+  if (width == 0 || height == 0 || depth == 0) {
+    return;
+  }
 
   srd_[0] = static_cast<uint32_t>(base);
-  srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(stride) << 16);
-  srd_[2] = static_cast<uint32_t>(records);
-  srd_[3] = getSrdFormat(*image);
+  srd_[1] = static_cast<uint32_t>(base >> 32) | (dataFormat << 20) | (numFormat << 26);
+  srd_[2] = ((width - 1) & 0x3fffu) | (((height - 1) & 0x3fffu) << 14);
+  srd_[3] = dstSel | (type << 28);
+  srd_[4] = (depth - 1) & 0x1fffu;
+  srd_[10] = width;
 }
 
 }  // namespace amd::cpu
