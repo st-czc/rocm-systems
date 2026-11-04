@@ -10,6 +10,7 @@
 #include "os/os.hpp"
 #include "platform/context.hpp"
 #include "platform/runtime.hpp"
+#include "platform/sampler.hpp"
 #include "utils/debug.hpp"
 #include "utils/flags.hpp"
 
@@ -192,9 +193,15 @@ device::Memory* Device::createMemory(amd::Memory& owner) const {
   return createBufferMemory(owner, owner.getAlignment());
 }
 
-bool Device::createSampler(const amd::Sampler&, device::Sampler** sampler) const {
-  *sampler = new Sampler();
-  return *sampler != nullptr;
+bool Device::createSampler(const amd::Sampler& owner, device::Sampler** sampler) const {
+  *sampler = nullptr;
+  Sampler* cpuSampler = new Sampler();
+  if (cpuSampler == nullptr || !cpuSampler->create(owner)) {
+    delete cpuSampler;
+    return false;
+  }
+  *sampler = cpuSampler;
+  return true;
 }
 
 Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
@@ -246,6 +253,34 @@ Image* Device::createImageMemory(amd::Memory& owner) const {
 Sampler::Sampler() : device::Sampler() {
   std::memset(state_, 0, sizeof(state_));
   hwState_ = reinterpret_cast<address>(state_);
+}
+
+bool Sampler::create(const amd::Sampler& owner) {
+  // gfx9 S# subset: clamp in DW0[2:0], force-unnormalized in DW0[15],
+  // mag/min filter in DW1[1:0] and DW1[3:2].
+  uint32_t clamp = 0;
+  switch (owner.addressingMode(0)) {
+    case CL_ADDRESS_REPEAT:
+      clamp = 0;
+      break;
+    case CL_ADDRESS_MIRRORED_REPEAT:
+      clamp = 1;
+      break;
+    case CL_ADDRESS_CLAMP_TO_EDGE:
+      clamp = 2;
+      break;
+    case CL_ADDRESS_CLAMP:
+      clamp = 4;
+      break;
+    default:
+      break;
+  }
+
+  const uint32_t filter = (owner.filterMode() == CL_FILTER_LINEAR) ? 1u : 0u;
+  state_[0] = clamp;
+  state_[0] |= owner.normalizedCoords() ? 0u : (1u << 15);
+  state_[1] = filter | (filter << 2);
+  return true;
 }
 
 void* Device::svmAlloc(amd::Context& context, size_t size, size_t alignment,
@@ -376,6 +411,7 @@ void NullDevice::fillDeviceInfo() {
   // hipMalloc3D produce a nonzero, aligned pitch even without image support.
   info_.imagePitchAlignment_ = 256;
   info_.imageBaseAddressAlignment_ = 256;
+  info_.image2DMaxWidth_ = 16384;
 
   // Offline targets cannot allocate or execute.
   info_.svmCapabilities_ = 0;

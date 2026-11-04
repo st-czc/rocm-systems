@@ -28,6 +28,9 @@ class Sampler : public device::Sampler {
  public:
   Sampler();
 
+  //! Fills the sampler state from the platform sampler object.
+  bool create(const amd::Sampler& owner);
+
   //! Default destructor
   virtual ~Sampler() = default;
 

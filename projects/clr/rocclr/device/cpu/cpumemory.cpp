@@ -15,6 +15,101 @@
 
 namespace amd::cpu {
 
+namespace {
+
+// Buffer resource descriptor (V#) DW3: DST_SEL[7:0], NUM_FORMAT[10:8],
+// DATA_FORMAT[15:12].
+uint32_t getSrdFormat(const amd::Image& image) {
+  const cl_image_format& format = image.getImageFormat();
+
+  uint32_t channels = 0;
+  switch (format.image_channel_order) {
+    case CL_R:
+      channels = 1;
+      break;
+    case CL_RG:
+      channels = 2;
+      break;
+    case CL_RGBA:
+      channels = 4;
+      break;
+    default:
+      return 0;
+  }
+
+  uint32_t numFormat = 0;
+  switch (format.image_channel_data_type) {
+    case CL_UNORM_INT8:
+    case CL_UNORM_INT16:
+      numFormat = 0;
+      break;
+    case CL_SNORM_INT8:
+    case CL_SNORM_INT16:
+      numFormat = 1;
+      break;
+    case CL_UNSIGNED_INT8:
+    case CL_UNSIGNED_INT16:
+    case CL_UNSIGNED_INT32:
+      numFormat = 4;
+      break;
+    case CL_SIGNED_INT8:
+    case CL_SIGNED_INT16:
+    case CL_SIGNED_INT32:
+      numFormat = 5;
+      break;
+    case CL_HALF_FLOAT:
+    case CL_FLOAT:
+      numFormat = 7;
+      break;
+    default:
+      return 0;
+  }
+
+  uint32_t bits = 0;
+  switch (format.image_channel_data_type) {
+    case CL_UNORM_INT8:
+    case CL_SNORM_INT8:
+    case CL_UNSIGNED_INT8:
+    case CL_SIGNED_INT8:
+      bits = 8;
+      break;
+    case CL_UNORM_INT16:
+    case CL_SNORM_INT16:
+    case CL_UNSIGNED_INT16:
+    case CL_SIGNED_INT16:
+    case CL_HALF_FLOAT:
+      bits = 16;
+      break;
+    default:
+      bits = 32;
+      break;
+  }
+
+  uint32_t dataFormat = 0;
+  if (channels == 1) {
+    dataFormat = (bits == 8) ? 1 : (bits == 16) ? 2 : 4;
+  } else if (channels == 2) {
+    dataFormat = (bits == 8) ? 3 : (bits == 16) ? 5 : 11;
+  } else {
+    dataFormat = (bits == 8) ? 10 : (bits == 16) ? 12 : 14;
+  }
+
+  uint32_t dstSel = 0;
+  if (channels > 1) {
+    dstSel |= 1u << 2;
+  }
+  if (channels > 2) {
+    dstSel |= 2u << 4;
+  }
+  if (channels > 3) {
+    dstSel |= 3u << 6;
+  }
+
+  return dstSel | (numFormat << 8) | (dataFormat << 12);
+}
+
+}  // namespace
+
 Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
     : device::Memory(owner), dev_(dev), ptr_(nullptr),
       ownership_(StorageOwnership::Borrowed) {
@@ -121,6 +216,7 @@ Image::Image(const Device& dev, amd::Memory& owner) : Memory(dev, owner) {
   srd_[0] = static_cast<uint32_t>(base);
   srd_[1] = static_cast<uint32_t>(base >> 32) | (static_cast<uint32_t>(elementSize) << 16);
   srd_[2] = static_cast<uint32_t>(numRecords);
+  srd_[3] = getSrdFormat(*image);
 }
 
 }  // namespace amd::cpu
