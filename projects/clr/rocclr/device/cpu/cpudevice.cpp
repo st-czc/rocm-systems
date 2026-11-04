@@ -234,6 +234,12 @@ Image* Device::createImageMemory(amd::Memory& owner) const {
     delete image;
     return nullptr;
   }
+  // The V# encodes the base address in 48 bits.
+  if ((image->virtualAddress() >> 48) != 0) {
+    LogError("CPU image base address does not fit in the 48-bit V# field!");
+    delete image;
+    return nullptr;
+  }
   return image;
 }
 
