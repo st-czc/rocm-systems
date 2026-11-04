@@ -342,15 +342,29 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
       break;
     }
     case CL_COMMAND_COPY_IMAGE_TO_BUFFER: {
-      result = blitMgr().copyImageToBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                           cmd.size(), entire, cmd.dstRect().rowPitch_,
-                                           cmd.dstRect().slicePitch_, cmd.copyMetadata());
+      const size_t rowPitch = cmd.dstRect().rowPitch_;
+      const size_t elementSize = cmd.source().asImage()->getImageFormat().getElementSize();
+      if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
+        result = copyImageToBufferRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
+                                       cmd.dstRect().slicePitch_);
+      } else {
+        result = blitMgr().copyImageToBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
+                                             cmd.dstOrigin(), cmd.size(), entire, rowPitch,
+                                             cmd.dstRect().slicePitch_, cmd.copyMetadata());
+      }
       break;
     }
     case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
-      result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                           cmd.size(), entire, cmd.srcRect().rowPitch_,
-                                           cmd.srcRect().slicePitch_, cmd.copyMetadata());
+      const size_t rowPitch = cmd.srcRect().rowPitch_;
+      const size_t elementSize = cmd.destination().asImage()->getImageFormat().getElementSize();
+      if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
+        result = copyBufferToImageRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
+                                       cmd.srcRect().slicePitch_);
+      } else {
+        result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
+                                             cmd.dstOrigin(), cmd.size(), entire, rowPitch,
+                                             cmd.srcRect().slicePitch_, cmd.copyMetadata());
+      }
       break;
     }
     default:
@@ -460,6 +474,50 @@ void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
   LogPrintfInfo("CPU VirtualDevice::SubmitBatchReadMemory: %llu ns",
                 static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+}
+
+//! HostBlitManager advances the buffer by the copied row width, not by the
+//! buffer row pitch. Split the copy per row when the buffer is pitched.
+bool VirtualDevice::copyBufferToImageRows(device::Memory& srcMemory, device::Memory& dstMemory,
+                                          const amd::CopyMemoryCommand& cmd, size_t rowPitch,
+                                          size_t slicePitch) {
+  const amd::Coord3D& srcOrigin = cmd.srcOrigin();
+  const amd::Coord3D& dstOrigin = cmd.dstOrigin();
+  const amd::Coord3D& size = cmd.size();
+
+  for (size_t slice = 0; slice < size[2]; ++slice) {
+    for (size_t row = 0; row < size[1]; ++row) {
+      const amd::Coord3D src(srcOrigin[0] + row * rowPitch + slice * slicePitch);
+      const amd::Coord3D dst(dstOrigin[0], dstOrigin[1] + row, dstOrigin[2] + slice);
+      const amd::Coord3D oneRow(size[0], 1, 1);
+      if (!blitMgr().copyBufferToImage(srcMemory, dstMemory, src, dst, oneRow, false, 0, 0,
+                                       cmd.copyMetadata())) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool VirtualDevice::copyImageToBufferRows(device::Memory& srcMemory, device::Memory& dstMemory,
+                                          const amd::CopyMemoryCommand& cmd, size_t rowPitch,
+                                          size_t slicePitch) {
+  const amd::Coord3D& srcOrigin = cmd.srcOrigin();
+  const amd::Coord3D& dstOrigin = cmd.dstOrigin();
+  const amd::Coord3D& size = cmd.size();
+
+  for (size_t slice = 0; slice < size[2]; ++slice) {
+    for (size_t row = 0; row < size[1]; ++row) {
+      const amd::Coord3D src(srcOrigin[0], srcOrigin[1] + row, srcOrigin[2] + slice);
+      const amd::Coord3D dst(dstOrigin[0] + row * rowPitch + slice * slicePitch);
+      const amd::Coord3D oneRow(size[0], 1, 1);
+      if (!blitMgr().copyImageToBuffer(srcMemory, dstMemory, src, dst, oneRow, false, 0, 0,
+                                       cmd.copyMetadata())) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,

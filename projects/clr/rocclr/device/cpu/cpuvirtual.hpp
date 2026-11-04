@@ -77,6 +77,14 @@ class VirtualDevice : public device::VirtualDevice {
   }
 
  private:
+  //! Copies a pitched buffer to an image one row at a time
+  bool copyBufferToImageRows(device::Memory& srcMemory, device::Memory& dstMemory,
+                             const amd::CopyMemoryCommand& cmd, size_t rowPitch, size_t slicePitch);
+
+  //! Copies an image to a pitched buffer one row at a time
+  bool copyImageToBufferRows(device::Memory& srcMemory, device::Memory& dstMemory,
+                             const amd::CopyMemoryCommand& cmd, size_t rowPitch, size_t slicePitch);
+
   //! Fills a memory object with a pattern
   bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
                   size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,
