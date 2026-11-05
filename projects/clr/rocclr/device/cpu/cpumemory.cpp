@@ -9,6 +9,7 @@
 #include "device/cpu/cpudevice.hpp"
 #include "os/alloc.hpp"
 #include "utils/debug.hpp"
+#include "utils/util.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -112,8 +113,7 @@ std::tuple<uint32_t, uint32_t, uint32_t> getSrdFormat(const amd::Image& image) {
 }  // namespace
 
 Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
-    : device::Memory(owner), dev_(dev), ptr_(nullptr),
-      ownership_(StorageOwnership::Borrowed) {
+    : device::Memory(owner), dev_(dev), ptr_(nullptr), ownership_(StorageOwnership::Borrowed) {
   if (owner.parent() != nullptr) {
     device::Memory* parent = owner.parent()->getDeviceMemory(dev_);
     if (parent == nullptr || parent->virtualAddress() == 0) {
@@ -141,7 +141,6 @@ Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
                   std::max(alignment, static_cast<size_t>(owner.getAlignment())))) {
       return;
     }
-    ownership_ = StorageOwnership::AlignedAllocation;
     if (ptr_ != nullptr && (owner.getMemFlags() & CL_MEM_COPY_HOST_PTR) &&
         owner.getHostMem() != nullptr) {
       std::memcpy(ptr_, owner.getHostMem(), owner.getSize());
@@ -167,27 +166,18 @@ Memory::~Memory() {
 }
 
 bool Memory::allocate(size_t size, size_t alignment) {
-  if (size == 0) {
+  if (size == 0 || !amd::isPowerOfTwo(alignment)) {
     return false;
   }
 
-  // HIP guarantees that device allocations are aligned to at least 256 bytes.
-  constexpr size_t kDeviceAllocationAlignment = 256;
-
-  // posix_memalign requires a nonzero power-of-two multiple of sizeof(void*).
   alignment = std::max(alignment, static_cast<size_t>(dev_.info().memBaseAddrAlign_));
-  alignment = std::max(alignment, kDeviceAllocationAlignment);
-  alignment = std::max(alignment, sizeof(void*));
-  if ((alignment & (alignment - 1)) != 0) {
-    LogError("CPU memory alignment must be a power of two!");
-    return false;
-  }
+
   ptr_ = static_cast<address>(amd::AlignedMemory::allocate(size, alignment));
   if (ptr_ == nullptr) {
-    LogError("Unable to allocate host memory!");
     return false;
   }
 
+  ownership_ = StorageOwnership::AlignedAllocation;
   return true;
 }
 

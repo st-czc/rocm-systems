@@ -406,7 +406,9 @@ void NullDevice::fillDeviceInfo() {
   info_.preferredConstantBufferSize_ = 64 * Ki;
   info_.maxParameterSize_ = 1024;
   info_.globalMemCacheLineSize_ = 64;
-  info_.memBaseAddrAlign_ = 128;
+  // The original definition of the field is in bits for OpenCL. hipamd uses
+  // the field as a byte alignment. This target stores 256 bytes.
+  info_.memBaseAddrAlign_ = 256;
   info_.minDataTypeAlignSize_ = 128;
 
   // Linear memory layout. Set unconditionally so that hipMallocPitch and
