@@ -358,6 +358,8 @@ void NullDevice::fillDeviceInfo() {
   ::strncpy(info_.boardName_, "CPU", sizeof(info_.boardName_) - 1);
   ::snprintf(info_.driverVersion_, sizeof(info_.driverVersion_), "%d.%d", 1, 0);
 
+  info_.wallClockFrequency_ = 2000000;
+
   // One compute unit, one work item at a time. The wavefront width must not be
   // zero. TODO: The limits below match gfx906. Derive them from the host.
   info_.maxComputeUnits_ = 60;
