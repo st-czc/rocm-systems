@@ -61,6 +61,8 @@ class Agent;  // forward declaration for Packet::Retire
 //! holds a pointer retains it, and the last release deletes the signal.
 class Signal : public amd::ReferenceCountedObject {
  public:
+  using Callback = std::function<void()>;
+
   Signal() = default;
   Signal(const Signal&) = delete;
   Signal& operator=(const Signal&) = delete;
@@ -72,13 +74,13 @@ class Signal : public amd::ReferenceCountedObject {
   void Wait();
 
   //! Runs |on_done| once, inline if the signal is already done.
-  void OnDone(std::function<void()> on_done);
+  void OnDone(Callback on_done);
 
  private:
   std::atomic<int32_t> value_{1};
   std::mutex lock_;
   std::condition_variable cv_;
-  std::vector<std::function<void()>> waiters_;
+  std::vector<Callback> waiters_;
 };
 
 using Key = amd::ReferenceCountedObject;
@@ -98,6 +100,23 @@ struct Packet {
   Packet& operator=(const Packet&) = delete;
 };
 
+
+class AgentTask {
+  std::function<AgentTask(bool isAgent)> task_;
+
+ public:
+  AgentTask() : task_(nullptr) {}
+  AgentTask(std::function<AgentTask(bool isAgent)> task) : task_(std::move(task)) {}
+
+  operator bool() { return task_ != nullptr; }
+  AgentTask operator()(bool isAgent) {
+    if (task_) {
+      return task_(isAgent);
+    }
+    return AgentTask();
+  }
+};
+
 //! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs
 //! at a time, in submission order. A head whose deps are not done parks the
 //! queue and releases its worker.
@@ -109,7 +128,7 @@ class Queue {
 
  private:
   //! Starts the head if it may run. Idempotent and thread safe.
-  void Pump();
+  AgentTask Pump(bool isAgent = false);
 
   Agent& agent_;
   std::mutex lock_;
@@ -129,7 +148,7 @@ class Agent {
   Agent& operator=(const Agent&) = delete;
 
   //! Runs |task| on a worker. Never blocks.
-  void Submit(std::function<void()> task);
+  void Submit(AgentTask task);
 
   //! Returns once no work is queued or running.
   void WaitIdle();
@@ -145,7 +164,7 @@ class Agent {
   std::mutex lock_;
   std::condition_variable cv_;
   std::condition_variable idle_cv_;
-  std::deque<std::function<void()>> tasks_;
+  std::deque<AgentTask> tasks_;
   //! Completion signal per command address. An entry exists exactly while its
   //! command has not completed, and it holds a reference on the command, so the
   //! key cannot be recycled while the entry is reachable.

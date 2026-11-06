@@ -6,7 +6,7 @@ namespace amd::device::prototype {
 
 // ================================================================================================
 void Signal::Notify() {
-  std::vector<std::function<void()>> waiters;
+  std::vector<Callback> waiters;
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (value_.load(std::memory_order_relaxed) != 0) {
@@ -25,7 +25,7 @@ void Signal::Wait() {
   cv_.wait(lock, [this] { return value_.load(std::memory_order_acquire) == 0; });
 }
 
-void Signal::OnDone(std::function<void()> on_done) {
+void Signal::OnDone(Callback on_done) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (value_.load(std::memory_order_acquire) != 0) {
@@ -47,13 +47,13 @@ void Queue::Submit(Packet* packet) {
   Pump();
 }
 
-void Queue::Pump() {
+AgentTask Queue::Pump(bool isAgent) {
   bool dispatch = false;
   Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
-      return;
+      return AgentTask(nullptr);
     }
     packet = packets_.front();
     if (waiting_ready_) {
@@ -87,23 +87,28 @@ void Queue::Pump() {
   }
 
   if (dispatch) {
-    auto task = [this, packet] {
+    auto task = [this, packet](bool isAgent) -> AgentTask {
       if (packet->work) {
         packet->work();
       }
+      // OnDone Pump here, notify other workers
       agent_.DonePacket(packet);
       {
         std::lock_guard<std::mutex> lock(lock_);
         busy_ = false;
       }
-      Pump();
+      return Pump(isAgent);
     };
-    if (packet->work) {
-      agent_.Submit(task);
+    if (isAgent) {
+      // Avoid submit to the agent_, less lock
+      return AgentTask(task);
+    } else if (packet->work) {
+      agent_.Submit(AgentTask(task));
+      return AgentTask();
     } else {
-      task();
+      // Fast path for marker when ready
+      return task(isAgent);
     }
-    return;
   }
 
   auto num_waiting = packet->deps.size();
@@ -119,6 +124,7 @@ void Queue::Pump() {
       Pump();
     });
   }
+  return AgentTask();
 }
 
 // ================================================================================================
@@ -141,7 +147,7 @@ Agent::~Agent() {
   }
 }
 
-void Agent::Submit(std::function<void()> task) {
+void Agent::Submit(AgentTask task) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     tasks_.push_back(std::move(task));
@@ -157,7 +163,7 @@ void Agent::WaitIdle() {
 
 void Agent::Loop(Agent* agent) {
   for (;;) {
-    std::function<void()> task;
+    AgentTask task;
     {
       std::unique_lock<std::mutex> lock(agent->lock_);
       agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
@@ -167,7 +173,10 @@ void Agent::Loop(Agent* agent) {
       task = std::move(agent->tasks_.front());
       agent->tasks_.pop_front();
     }
-    task();
+    // Get the next task from queue and execute it if possible
+    while (task) {
+      task = task(true);
+    }
     {
       std::lock_guard<std::mutex> lock(agent->lock_);
       if (--agent->pending_ == 0) {
