@@ -52,6 +52,8 @@ class ReferenceCountedObject {
 
 namespace amd::device::prototype {
 
+class Agent;  // forward declaration for Packet::Retire
+
 //! hsa_signal_t: starts armed (1), drops to done (0) once, never back.
 //! Subscribers registered after the drop run immediately, which is what makes
 //! a park-then-subscribe sequence free of lost wakeups.
@@ -87,18 +89,19 @@ struct Packet {
   std::vector<Signal*> deps;
   Signal* done = nullptr;
 
+  //! Completion bookkeeping: the command this packet completes and the agent
+  //! that holds its (cmd -> done) entry. The packet owns both the entry, which
+  //! it removes in Retire(), and the reference on |cmd| that keeps the entry's
+  //! key alive. Set together with PreparePacket, null for a packet that only
+  //! exists inside a test.
+  Agent* agent = nullptr;
+  amd::ReferenceCountedObject* cmd = nullptr;
+
   Packet() = default;
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
 
-  ~Packet() {
-    for (Signal* dep : deps) {
-      dep->release();
-    }
-    if (done != nullptr) {
-      done->release();
-    }
-  }
+  ~Packet();
 
   void AddDep(Signal* dep) {
     dep->retain();
@@ -109,9 +112,12 @@ struct Packet {
     signal->retain();
     done = signal;
   }
-};
 
-class Agent;
+  //! Drops the agent's (cmd -> done) entry and the references this packet holds
+  //! on |cmd| and |done|. Idempotent, and safe to call before the packet ran:
+  //! whichever of completion and destruction comes first performs it.
+  void Retire();
+};
 
 //! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs
 //! at a time, in submission order. A head whose deps are not done parks the
@@ -156,10 +162,25 @@ class Agent {
   //! which the caller releases when done.
   Signal* NewSignal();
 
-  //! Signal standing in for |event|, borrowed for the duration of the call.
-  //! The agent keeps one reference on it. Callers that outlive the call must
-  //! retain it, which Packet::AddDep/SetDone do.
-  Signal* SignalFor(const void* event);
+  //! Wires |packet| to |cmd| and to the events it waits on. The completion
+  //! signal is left in |packet.done|, where the packet's ownership of it is
+  //! plain: a caller that needs it past the packet's submission must retain it
+  //! first, exactly as it would for any other packet field.
+  //!
+  //! Everything happens under one lock so the two directions of the entry cannot
+  //! disagree: a dependency edge is only added while its entry is in the table,
+  //! and an entry is only removed once its event has completed.
+  //!
+  //! |cmd| arrives with one reference that the packet inherits and releases in
+  //! Packet::Retire, which is what keeps the entry's key valid for as long as
+  //! the entry exists. |wait_list| members are borrowed, not retained: a command
+  //! already holds the events it waits on.
+  void PreparePacket(Packet& packet, amd::ReferenceCountedObject& cmd,
+                     const std::vector<amd::ReferenceCountedObject*>& wait_list);
+
+  //! Drops the (cmd -> signal) entry and releases the reference on |cmd| that
+  //! Packet::PreparePacket took. Called by Packet::Retire only.
+  void RetireEntry(amd::ReferenceCountedObject* cmd);
 
  private:
   static void Loop(Agent* agent);
@@ -168,7 +189,10 @@ class Agent {
   std::condition_variable cv_;
   std::condition_variable idle_cv_;
   std::deque<std::function<void()>> tasks_;
-  std::unordered_map<const void*, Signal*> event_signals_;
+  //! Completion signal per command address. An entry exists exactly while its
+  //! command has not completed, and it holds a reference on the command, so the
+  //! key cannot be recycled while the entry is reachable.
+  std::unordered_map<const amd::ReferenceCountedObject*, Signal*> event_signals_;
   std::vector<std::unique_ptr<Queue>> queues_;
   std::vector<std::thread> workers_;
   uint64_t pending_ = 0;

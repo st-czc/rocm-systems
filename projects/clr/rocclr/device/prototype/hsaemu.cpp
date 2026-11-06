@@ -108,6 +108,10 @@ void Queue::Execute(Packet* packet) {
   if (packet->work) {
     packet->work();
   }
+  // The work has run, so the command is complete: drop its entry before waking
+  // anyone, so that a packet submitted afterwards sees "no entry" and reads it
+  // as "already complete".
+  packet->Retire();
   if (packet->done != nullptr) {
     packet->done->Notify();
   }
@@ -177,15 +181,71 @@ Queue* Agent::NewQueue() {
 
 Signal* Agent::NewSignal() { return new Signal(); }
 
-Signal* Agent::SignalFor(const void* event) {
+// ================================================================================================
+void Agent::PreparePacket(Packet& packet, amd::ReferenceCountedObject& cmd,
+                          const std::vector<amd::ReferenceCountedObject*>& wait_list) {
   std::lock_guard<std::mutex> lock(lock_);
-  auto it = event_signals_.find(event);
-  if (it != event_signals_.end()) {
-    return it->second;
+
+  // A wait-list member that is absent from the table has already completed:
+  // its entry is removed only after its work ran, so there is no signal left
+  // to wait on and no dependency edge is created.
+  for (amd::ReferenceCountedObject* event : wait_list) {
+    auto it = event_signals_.find(event);
+    if (it != event_signals_.end()) {
+      packet.AddDep(it->second);
+    }
   }
-  Signal* signal = new Signal();
-  event_signals_.emplace(event, signal);
-  return signal;
+
+  // The single reference `new` returns belongs to the packet: it is what the
+  // entry is valid for, and what ~Packet releases. The caller reads it back
+  // from packet.done rather than from a return value, so ownership stays plain.
+  Signal* done = new Signal();
+  packet.done = done;
+  // Assignment, not emplace: an entry for this address cannot still exist
+  // (it would be holding the command alive), and silently losing the insert
+  // would strand |done|.
+  event_signals_[&cmd] = done;
+
+  // The table keeps an entry's key alive through the packet that owns the
+  // pair; Packet::Retire drops this reference together with the entry.
+  cmd.retain();
+  packet.agent = this;
+  packet.cmd = &cmd;
+}
+
+// ================================================================================================
+void Agent::RetireEntry(amd::ReferenceCountedObject* cmd) {
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    event_signals_.erase(cmd);
+  }
+  // Outside the lock: releasing the last reference destroys the command, and a
+  // destructor must not run while the agent's table is locked.
+  cmd->release();
+}
+
+// ================================================================================================
+Packet::~Packet() {
+  Retire();
+  for (Signal* dep : deps) {
+    dep->release();
+  }
+  if (done != nullptr) {
+    done->release();
+  }
+}
+
+// ================================================================================================
+void Packet::Retire() {
+  if (agent == nullptr) {
+    return;
+  }
+  // Take the fields first: RetireEntry releases |cmd|, which may destroy it.
+  Agent* owner = agent;
+  amd::ReferenceCountedObject* command = cmd;
+  agent = nullptr;
+  cmd = nullptr;
+  owner->RetireEntry(command);
 }
 
 }  // namespace amd::device::prototype
