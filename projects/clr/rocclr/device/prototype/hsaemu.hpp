@@ -69,8 +69,10 @@ class Queue {
   Agent& agent_;
   std::mutex lock_;
   std::deque<std::shared_ptr<Packet>> packets_;
-  bool busy_ = false;    //!< a packet is running on a worker
-  bool parked_ = false;  //!< subscribed to the current head's unmet deps
+  bool busy_ = false;       //!< a packet is running on a worker
+  size_t num_waiting_ = 0;  //!< subscriptions outstanding for the head; nonzero = parked
+  //! The head's outstanding deps all fired, so it may dispatch without a rescan.
+  bool waiting_ready_ = false;
 };
 
 //! Worker pool plus the queues and signals it owns. One agent per device.

@@ -149,6 +149,39 @@ static void TestManyQueues() {
   printf("PASS concurrent submit (50 iters x 320 packets x 4 threads)\n");
 }
 
+// ---- T7: several deps fired one by one, exactly one dispatch ----
+static void TestManyDeps() {
+  for (int iter = 0; iter < 100; ++iter) {
+    Agent agent(2);
+    Queue* q = agent.NewQueue();
+    const int kDeps = 5;
+    std::vector<Signal*> deps;
+    for (int i = 0; i < kDeps; ++i) deps.push_back(agent.NewSignal());
+
+    std::atomic<int> runs{0};
+    auto p = std::make_shared<Packet>();
+    p->deps = deps;
+    p->work = [&runs] {
+      int seen = ++runs;   // second dispatch would make this 2
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      (void)seen;
+    };
+    q->Submit(p);
+
+    // Fire every dep except the last one while the queue is parked.
+    for (int i = 0; i + 1 < kDeps; ++i) {
+      deps[i]->Notify();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    if (runs != 0) { printf("FAIL many deps ran before last dep\n"); return; }
+
+    deps[kDeps - 1]->Notify();
+    agent.WaitIdle();
+    if (runs != 1) { printf("FAIL many deps dispatched %d times\n", runs.load()); return; }
+  }
+  printf("PASS many deps (5 deps fired one by one, one dispatch)\n");
+}
+
 int main() {
   TestFifo();
   TestBlocking();
@@ -156,6 +189,7 @@ int main() {
   TestRace();
   TestCrossQueue();
   TestManyQueues();
+  TestManyDeps();
   printf("done\n");
   return 0;
 }

@@ -53,25 +53,25 @@ void Queue::Pump() {
 
   {
     std::lock_guard<std::mutex> lock(lock_);
-    if (busy_ || packets_.empty()) {
+    if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
       return;
     }
-    Packet* head = packets_.front().get();
-    for (Signal* dep : head->deps) {
-      if (!dep->IsDone()) {
-        unmet.push_back(dep);
+    if (waiting_ready_) {
+      waiting_ready_ = false;
+    } else {
+      Packet* head = packets_.front().get();
+      for (Signal* dep : head->deps) {
+        if (!dep->IsDone()) {
+          unmet.push_back(dep);
+        }
       }
     }
     if (unmet.empty()) {
       packet = packets_.front();
       packets_.pop_front();
       busy_ = true;
-      parked_ = false;
     } else {
-      if (parked_) {
-        return;
-      }
-      parked_ = true;
+      num_waiting_ = unmet.size();
     }
   }
 
@@ -88,12 +88,16 @@ void Queue::Pump() {
   }
 
   // Only unmet deps are subscribed, so an already-done dep cannot re-enter
-  // here; a dep that completes inside the subscription window re-pumps once.
+  // here. The counter is armed before subscribing: a dep that completes inside
+  // the loop fires inline and decrements it, and only the last one re-pumps.
   for (Signal* dep : unmet) {
     dep->OnDone([this] {
       {
         std::lock_guard<std::mutex> lock(lock_);
-        parked_ = false;
+        if (--num_waiting_ != 0) {
+          return;
+        }
+        waiting_ready_ = true;
       }
       Pump();
     });
