@@ -45,51 +45,41 @@ void VirtualCPU::UpdateBatchState(amd::Command* list) {
 }
 
 void VirtualCPU::Submit(amd::Command& cmd) {
-  auto packet = std::make_shared<Packet>();
-
   std::vector<amd::ReferenceCountedObject*> wait_list;
   for (amd::Event* event : cmd.eventWaitList()) {
     wait_list.push_back(static_cast<amd::Command*>(event));
   }
-  agent_.PreparePacket(*packet, cmd, wait_list);
+  auto packet = agent_.NewPacket(&cmd, wait_list);
+
   packet->work = [] { SimulateWork(); };
 
-  queue_->Submit(std::move(packet));
+  queue_->Submit(packet);
 }
 
 void VirtualCPU::submitMarker(amd::Marker& cmd) {
-  auto packet = std::make_shared<Packet>();
-
   std::vector<amd::ReferenceCountedObject*> wait_list;
   for (amd::Event* event : cmd.eventWaitList()) {
     wait_list.push_back(static_cast<amd::Command*>(event));
   }
-  agent_.PreparePacket(*packet, cmd, wait_list);
+  auto packet = agent_.NewPacket(&cmd, wait_list);
 
-  // Only the batch head carries completion: advancing the chain is what moves
-  // every command of the batch to CL_COMPLETE.
-  if (cmd.GetBatchHead() != nullptr) {
-    amd::Command* head = cmd.GetBatchHead();
-    packet->work = [head] { UpdateBatchState(head); };
-  } else {
-    packet->work = [] {};
-  }
+  packet->work = nullptr;
 
-  // An internal marker from finish()/terminate() is the caller's sync point.
-  // The wait outlives the packet, so it takes its own reference -- and must do
-  // so before submitting: the worker can run, retire and destroy the packet,
-  // taking the signal with it, before this thread gets control back.
   Signal* done = packet->done;
-  const bool cpu_wait = cmd.CpuWaitRequested();
-  if (cpu_wait) {
+
+  if (cmd.CpuWaitRequested()) {
     done->retain();
-  }
-
-  queue_->Submit(std::move(packet));
-
-  if (cpu_wait) {
+    queue_->Submit(packet);
     done->Wait();
     done->release();
+    if (auto* head = cmd.GetBatchHead()) {
+      UpdateBatchState(head);
+    }
+  } else {
+    if (auto* head = cmd.GetBatchHead()) {
+      done->OnDone([head] { UpdateBatchState(head); });
+    }
+    queue_->Submit(packet);
   }
 }
 

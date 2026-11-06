@@ -39,59 +39,76 @@ void Signal::OnDone(std::function<void()> on_done) {
 // ================================================================================================
 Queue::Queue(Agent& agent) : agent_(agent) {}
 
-void Queue::Submit(std::shared_ptr<Packet> packet) {
+void Queue::Submit(Packet* packet) {
   {
     std::lock_guard<std::mutex> lock(lock_);
-    packets_.push_back(std::move(packet));
+    packets_.push_back(packet);
   }
   Pump();
 }
 
 void Queue::Pump() {
-  std::shared_ptr<Packet> packet;
-  std::vector<Signal*> unmet;
-
+  bool dispatch = false;
+  Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
       return;
     }
+    packet = packets_.front();
     if (waiting_ready_) {
+      for (Signal* dep : packet->deps) {
+        dep->release();
+      }
+      packet->deps.clear();
       waiting_ready_ = false;
     } else {
-      Packet* head = packets_.front().get();
-      for (Signal* dep : head->deps) {
-        if (!dep->IsDone()) {
-          unmet.push_back(dep);
+      // reset the deps when packet become head
+      auto& deps = packet->deps;
+      size_t num_waiting = deps.size();
+      size_t new_num_waiting = 0;
+      for (size_t idx = 0; idx < num_waiting; idx++) {
+        auto* dep = packet->deps[idx];
+        if (dep->IsDone()) {
+          dep->release();
+        } else {
+          deps[new_num_waiting++] = dep;
         }
       }
+      deps.resize(new_num_waiting);
     }
-    if (unmet.empty()) {
-      packet = packets_.front();
+    if (packet->deps.empty()) {
       packets_.pop_front();
       busy_ = true;
+      dispatch = true;
     } else {
-      num_waiting_ = unmet.size();
+      num_waiting_ = packet->deps.size();
     }
   }
 
-  if (packet) {
-    agent_.Submit([this, packet] {
-      Execute(packet.get());
+  if (dispatch) {
+    auto task = [this, packet] {
+      if (packet->work) {
+        packet->work();
+      }
+      agent_.DonePacket(packet);
       {
         std::lock_guard<std::mutex> lock(lock_);
         busy_ = false;
       }
       Pump();
-    });
+    };
+    if (packet->work) {
+      agent_.Submit(task);
+    } else {
+      task();
+    }
     return;
   }
 
-  // Only unmet deps are subscribed, so an already-done dep cannot re-enter
-  // here. The counter is armed before subscribing: a dep that completes inside
-  // the loop fires inline and decrements it, and only the last one re-pumps.
-  for (Signal* dep : unmet) {
-    dep->OnDone([this] {
+  auto num_waiting = packet->deps.size();
+  for (size_t idx = 0; idx < num_waiting; idx++) {
+    packet->deps[idx]->OnDone([this] {
       {
         std::lock_guard<std::mutex> lock(lock_);
         if (--num_waiting_ != 0) {
@@ -101,19 +118,6 @@ void Queue::Pump() {
       }
       Pump();
     });
-  }
-}
-
-void Queue::Execute(Packet* packet) {
-  if (packet->work) {
-    packet->work();
-  }
-  // The work has run, so the command is complete: drop its entry before waking
-  // anyone, so that a packet submitted afterwards sees "no entry" and reads it
-  // as "already complete".
-  packet->Retire();
-  if (packet->done != nullptr) {
-    packet->done->Notify();
   }
 }
 
@@ -179,73 +183,35 @@ Queue* Agent::NewQueue() {
   return queues_.back().get();
 }
 
-Signal* Agent::NewSignal() { return new Signal(); }
-
-// ================================================================================================
-void Agent::PreparePacket(Packet& packet, amd::ReferenceCountedObject& cmd,
-                          const std::vector<amd::ReferenceCountedObject*>& wait_list) {
-  std::lock_guard<std::mutex> lock(lock_);
-
-  // A wait-list member that is absent from the table has already completed:
-  // its entry is removed only after its work ran, so there is no signal left
-  // to wait on and no dependency edge is created.
-  for (amd::ReferenceCountedObject* event : wait_list) {
-    auto it = event_signals_.find(event);
-    if (it != event_signals_.end()) {
-      packet.AddDep(it->second);
-    }
-  }
-
-  // The single reference `new` returns belongs to the packet: it is what the
-  // entry is valid for, and what ~Packet releases. The caller reads it back
-  // from packet.done rather than from a return value, so ownership stays plain.
+Packet* Agent::NewPacket(Key* cmd, const KeyList& wait_list) {
+  auto* packet = new Packet;
+  cmd->retain();
+  packet->cmd = cmd;
   Signal* done = new Signal();
-  packet.done = done;
-  // Assignment, not emplace: an entry for this address cannot still exist
-  // (it would be holding the command alive), and silently losing the insert
-  // would strand |done|.
-  event_signals_[&cmd] = done;
-
-  // The table keeps an entry's key alive through the packet that owns the
-  // pair; Packet::Retire drops this reference together with the entry.
-  cmd.retain();
-  packet.agent = this;
-  packet.cmd = &cmd;
-}
-
-// ================================================================================================
-void Agent::RetireEntry(amd::ReferenceCountedObject* cmd) {
+  packet->done = done;
+  packet->deps.reserve(wait_list.size());
   {
     std::lock_guard<std::mutex> lock(lock_);
-    event_signals_.erase(cmd);
+    for (Key* event : wait_list) {
+      auto it = event_signals_.find(event);
+      if (it != event_signals_.end()) {
+        it->second->retain();
+        packet->deps.push_back(it->second);
+      }
+    }
+    event_signals_[cmd] = done;
   }
-  // Outside the lock: releasing the last reference destroys the command, and a
-  // destructor must not run while the agent's table is locked.
-  cmd->release();
+  return packet;
 }
 
-// ================================================================================================
-Packet::~Packet() {
-  Retire();
-  for (Signal* dep : deps) {
-    dep->release();
+void Agent::DonePacket(Packet* packet) {
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    event_signals_.erase(packet->cmd);
   }
-  if (done != nullptr) {
-    done->release();
-  }
+  packet->done->Notify();
+  packet->cmd->release();
+  packet->done->release();
+  delete packet;
 }
-
-// ================================================================================================
-void Packet::Retire() {
-  if (agent == nullptr) {
-    return;
-  }
-  // Take the fields first: RetireEntry releases |cmd|, which may destroy it.
-  Agent* owner = agent;
-  amd::ReferenceCountedObject* command = cmd;
-  agent = nullptr;
-  cmd = nullptr;
-  owner->RetireEntry(command);
-}
-
 }  // namespace amd::device::prototype
