@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <atomic>
 #include <vector>
-#include <random>
 #include <thread>
 
 using namespace amd::device::prototype;
@@ -36,7 +35,7 @@ static void TestBlocking() {
   std::atomic<bool> ran_before{false};
 
   auto a = std::make_shared<Packet>();
-  a->deps = {gate};
+  a->AddDep(gate);
   a->work = [&ran_after] { ran_after = true; };
   auto b = std::make_shared<Packet>();
   b->work = [&ran_before] { ran_before = true; };
@@ -61,7 +60,7 @@ static void TestWorkerNotHeld() {
   std::atomic<bool> other_ran{false};
 
   auto a = std::make_shared<Packet>();
-  a->deps = {gate};
+  a->AddDep(gate);
   a->work = [] {};
   parked->Submit(a);
 
@@ -85,7 +84,7 @@ static void TestRace() {
     Signal* gate = agent.NewSignal();
     std::atomic<bool> done{false};
     auto p = std::make_shared<Packet>();
-    p->deps = {gate};
+    p->AddDep(gate);
     p->work = [&done] { done = true; };
     q->Submit(p);
     std::thread t([gate] {
@@ -108,14 +107,15 @@ static void TestCrossQueue() {
   std::atomic<int> step{0};
 
   auto a = std::make_shared<Packet>();
-  a->done = s1;
+  a->SetDone(s1);
   a->work = [&step] { assert(step == 0); step = 1; };
   q1->Submit(a);
 
   auto b = std::make_shared<Packet>();
-  b->deps = {s1};
+  b->AddDep(s1);
   b->work = [&step] { assert(step == 1); step = 2; };
   q2->Submit(b);
+  s1->release();
 
   agent.WaitIdle();
   if (step != 2) { printf("FAIL cross queue order\n"); return; }
@@ -137,7 +137,9 @@ static void TestManyQueues() {
         for (int i = 0; i < np; ++i) {
           auto p = std::make_shared<Packet>();
           p->work = [&count] { ++count; };
-          p->done = agent.NewSignal();
+          Signal* s = agent.NewSignal();
+          p->SetDone(s);
+          s->release();
           qs[(size_t)&p % nq]->Submit(p);
         }
       });
@@ -160,7 +162,7 @@ static void TestManyDeps() {
 
     std::atomic<int> runs{0};
     auto p = std::make_shared<Packet>();
-    p->deps = deps;
+    for (Signal* dep : deps) p->AddDep(dep);
     p->work = [&runs] {
       int seen = ++runs;   // second dispatch would make this 2
       std::this_thread::sleep_for(std::chrono::milliseconds(5));

@@ -15,12 +15,49 @@
 #include <unordered_map>
 #include <vector>
 
+//! Standalone builds (hsaemu_test.cpp) cannot pull in rocclr's headers, so they
+//! get a local stand-in with the same contract: starts at 1, deletes itself
+//! when the last reference goes away.
+#ifdef PROTOTYPE_STANDALONE
+namespace amd {
+class ReferenceCountedObject {
+ public:
+  ReferenceCountedObject() : referenceCount_(1) {}
+  ReferenceCountedObject(const ReferenceCountedObject&) = delete;
+  ReferenceCountedObject& operator=(const ReferenceCountedObject&) = delete;
+
+  uint32_t referenceCount() const { return referenceCount_.load(std::memory_order_acquire); }
+
+  void retain() { referenceCount_.fetch_add(1, std::memory_order_acq_rel); }
+
+  uint32_t release() {
+    uint32_t count = referenceCount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    if (count == 0) {
+      referenceCount_.store(1, std::memory_order_relaxed);
+      delete this;
+    }
+    return count;
+  }
+
+ protected:
+  virtual ~ReferenceCountedObject() = default;
+
+ private:
+  std::atomic<uint32_t> referenceCount_;
+};
+}  // namespace amd
+#else
+#include "top.hpp"
+#endif
+
 namespace amd::device::prototype {
 
 //! hsa_signal_t: starts armed (1), drops to done (0) once, never back.
 //! Subscribers registered after the drop run immediately, which is what makes
 //! a park-then-subscribe sequence free of lost wakeups.
-class Signal {
+//! Lifetime follows amd::ReferenceCountedObject, like ProfilingSignal: whoever
+//! holds a pointer retains it, and the last release deletes the signal.
+class Signal : public amd::ReferenceCountedObject {
  public:
   Signal() = default;
   Signal(const Signal&) = delete;
@@ -42,12 +79,36 @@ class Signal {
   std::vector<std::function<void()>> waiters_;
 };
 
-//! One entry in a queue: the work, the signals it waits for, and the signal
-//! it raises when it is done.
+//! One entry in a queue: the work, the signals it must observe first, and the
+//! signal it raises when it is finished. A packet holds a reference on every
+//! signal it names, so none can be freed while the packet is alive.
 struct Packet {
   std::function<void()> work;
   std::vector<Signal*> deps;
   Signal* done = nullptr;
+
+  Packet() = default;
+  Packet(const Packet&) = delete;
+  Packet& operator=(const Packet&) = delete;
+
+  ~Packet() {
+    for (Signal* dep : deps) {
+      dep->release();
+    }
+    if (done != nullptr) {
+      done->release();
+    }
+  }
+
+  void AddDep(Signal* dep) {
+    dep->retain();
+    deps.push_back(dep);
+  }
+
+  void SetDone(Signal* signal) {
+    signal->retain();
+    done = signal;
+  }
 };
 
 class Agent;
@@ -90,8 +151,14 @@ class Agent {
   void WaitIdle();
 
   Queue* NewQueue();
+
+  //! Returns a new signal owned by the caller: it arrives with one reference,
+  //! which the caller releases when done.
   Signal* NewSignal();
-  //! Signal standing in for |event|; allocated on first use.
+
+  //! Signal standing in for |event|, borrowed for the duration of the call.
+  //! The agent keeps one reference on it. Callers that outlive the call must
+  //! retain it, which Packet::AddDep/SetDone do.
   Signal* SignalFor(const void* event);
 
  private:
@@ -101,7 +168,6 @@ class Agent {
   std::condition_variable cv_;
   std::condition_variable idle_cv_;
   std::deque<std::function<void()>> tasks_;
-  std::vector<std::unique_ptr<Signal>> signals_;
   std::unordered_map<const void*, Signal*> event_signals_;
   std::vector<std::unique_ptr<Queue>> queues_;
   std::vector<std::thread> workers_;

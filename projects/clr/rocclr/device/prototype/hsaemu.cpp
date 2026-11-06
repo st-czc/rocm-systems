@@ -175,11 +175,7 @@ Queue* Agent::NewQueue() {
   return queues_.back().get();
 }
 
-Signal* Agent::NewSignal() {
-  std::lock_guard<std::mutex> lock(lock_);
-  signals_.emplace_back(new Signal());
-  return signals_.back().get();
-}
+Signal* Agent::NewSignal() { return new Signal(); }
 
 Signal* Agent::SignalFor(const void* event) {
   std::lock_guard<std::mutex> lock(lock_);
@@ -187,9 +183,9 @@ Signal* Agent::SignalFor(const void* event) {
   if (it != event_signals_.end()) {
     return it->second;
   }
-  signals_.emplace_back(new Signal());
-  event_signals_.emplace(event, signals_.back().get());
-  return signals_.back().get();
+  Signal* signal = new Signal();
+  event_signals_.emplace(event, signal);
+  return signal;
 }
 
 }  // namespace amd::device::prototype

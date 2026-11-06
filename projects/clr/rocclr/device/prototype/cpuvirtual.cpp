@@ -48,19 +48,38 @@ void VirtualCPU::Submit(amd::Command& cmd) {
   auto packet = std::make_shared<Packet>();
 
   for (amd::Event* event : cmd.eventWaitList()) {
-    packet->deps.push_back(agent_.SignalFor(event));
+    packet->AddDep(agent_.SignalFor(event));
   }
-  packet->done = agent_.SignalFor(&cmd);
+  packet->SetDone(agent_.SignalFor(&cmd));
+  packet->work = [] { SimulateWork(); };
 
+  queue_->Submit(std::move(packet));
+}
+
+void VirtualCPU::submitMarker(amd::Marker& cmd) {
+  auto packet = std::make_shared<Packet>();
+
+  for (amd::Event* event : cmd.eventWaitList()) {
+    packet->AddDep(agent_.SignalFor(event));
+  }
+  Signal* done = agent_.SignalFor(&cmd);
+  packet->SetDone(done);
+
+  // Only the batch head carries completion: advancing the chain is what moves
+  // every command of the batch to CL_COMPLETE.
   if (cmd.GetBatchHead() != nullptr) {
-    // Nothing else in this batch moves a command to CL_COMPLETE.
     amd::Command* head = cmd.GetBatchHead();
     packet->work = [head] { UpdateBatchState(head); };
   } else {
-    packet->work = [] { SimulateWork(); };
+    packet->work = [] {};
   }
 
   queue_->Submit(std::move(packet));
+
+  // An internal marker from finish()/terminate() is the caller's sync point.
+  if (cmd.CpuWaitRequested()) {
+    done->Wait();
+  }
 }
 
 }  // namespace amd::device::prototype

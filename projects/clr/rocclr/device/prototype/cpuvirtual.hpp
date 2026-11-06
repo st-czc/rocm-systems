@@ -39,7 +39,7 @@ class VirtualCPU : public VirtualDevice {
   void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) override { Submit(cmd); }
   void submitKernel(amd::NDRangeKernelCommand& command) override { Submit(command); }
   void submitNativeFn(amd::NativeFnCommand& cmd) override { Submit(cmd); }
-  void submitMarker(amd::Marker& cmd) override { Submit(cmd); }
+  void submitMarker(amd::Marker& cmd) override;
   void submitAccumulate(amd::AccumulateCommand& cmd) override { Submit(cmd); }
   void submitExternalSemaphoreCmd(amd::ExternalSemaphoreCmd& cmd) override { Submit(cmd); }
   void submitFillMemory(amd::FillMemoryCommand& cmd) override { Submit(cmd); }
