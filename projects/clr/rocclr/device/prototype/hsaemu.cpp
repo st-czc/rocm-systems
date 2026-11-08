@@ -142,17 +142,11 @@ void Agent::Submit(Packet* task) {
   if (task == nullptr) {
     return;
   }
-  uint32_t num_tickets;
   {
     std::lock_guard<std::mutex> lock(lock_);
     tasks_.push_back(task);
-    num_tickets = task->num_tickets;
   }
-  if (num_tickets == 1) {
-    cv_.notify_one();
-  } else {
-    cv_.notify_all();
-  }
+  cv_.notify_one();
 }
 
 void Agent::Loop(Agent* agent) {
@@ -176,9 +170,14 @@ void Agent::Loop(Agent* agent) {
       }
       queue = task->queue;
     }
+    bool notified = false;
     // Get the next task from queue and execute it if possible
     while (task) {
       while (ticket.has_value()) {
+        if (!notified && ticket.value() != 0) {
+          agent->cv_.notify_one();
+          notified = true;
+        }
         task->work(ticket.value());
         ticket = task->get_ticket();
       }
@@ -187,9 +186,10 @@ void Agent::Loop(Agent* agent) {
         task = queue->NextWorkPacket(true);
         if (task != nullptr) {
           ticket = task->get_ticket();
-          if (task->num_tickets != 0) {
+          if (ticket != 0) {
             task->owners += 1;
             agent->Submit(task);
+            notified = true;
           }
         }
       } else {
