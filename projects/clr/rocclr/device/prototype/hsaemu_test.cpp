@@ -1,10 +1,10 @@
 // PROTOTYPE tests: the emulated HSA agent with divisible (multi-ticket) tasks.
 //
-// The public surface is: NewQueue, NewPacket(cmd, num_tickets, wait_list),
-// Submit, and per-packet done signals. There is no global WaitIdle, so a test
-// waits on a packet's done signal (retained first, since DonePacket deletes the
-// packet). Command objects are declared before the Agent so the Agent's workers
-// are joined before the commands are destroyed.
+// The public surface is: newQueue, newPacket(cmd, num_tickets, wait_list),
+// submit, and per-packet done signals. A test waits on a packet's done signal
+// (retained first, since donePacket deletes the packet). Command objects are
+// declared before the Pool so the Pool's workers are joined before the commands
+// are destroyed.
 #include "device/prototype/hsaemu.hpp"
 
 #include <atomic>
@@ -21,28 +21,28 @@ namespace {
 
 std::atomic<int> g_failures{0};
 
-void Check(bool ok, const char* what) {
+void check(bool ok, const char* what) {
   if (!ok) {
     printf("  FAIL %s\n", what);
     ++g_failures;
   }
 }
 
-void Pass(const char* what) { printf("PASS %s\n", what); }
+void pass(const char* what) { printf("PASS %s\n", what); }
 
-//! Submit |packet| and block until its done signal fires.
-void SubmitAndWait(Queue* queue, Packet* packet) {
+//! Submits |packet| and blocks until its done signal fires.
+void submitAndWait(Queue* queue, Packet* packet) {
   Signal* done = packet->done;
   done->retain();
-  queue->Submit(packet);
-  done->Wait();
+  queue->submit(packet);
+  done->wait();
   done->release();
 }
 
 //! One-shot gate.
 class Latch {
  public:
-  void Open() {
+  void open() {
     {
       std::lock_guard<std::mutex> lock(lock_);
       open_ = true;
@@ -50,7 +50,7 @@ class Latch {
     cv_.notify_all();
   }
 
-  void Wait() {
+  void wait() {
     std::unique_lock<std::mutex> lock(lock_);
     cv_.wait(lock, [this] { return open_; });
   }
@@ -67,11 +67,11 @@ struct TestCmd : amd::ReferenceCountedObject {
 };
 
 // ---- single-ticket packets run in order and always with ticket 0 ----
-void TestSingleTicketFifo() {
+void testSingleTicketFifo() {
   constexpr int kPackets = 500;
   std::vector<TestCmd> cmds(kPackets);
-  Agent agent(4);
-  Queue* queue = agent.NewQueue();
+  Pool pool(4);
+  Queue* queue = pool.newQueue();
 
   std::atomic<int> seq{0};
   std::atomic<bool> ordered{true};
@@ -80,8 +80,8 @@ void TestSingleTicketFifo() {
   std::vector<Packet*> packets;
   packets.reserve(kPackets);
   for (int i = 0; i < kPackets; ++i) {
-    auto* p = agent.NewPacket(&cmds[i], 1, {});
-    p->work = [&seq, &ordered, &bad_ticket, i](int t) {
+    auto* p = pool.newPacket(&cmds[i], 1, {});
+    p->task = [&seq, &ordered, &bad_ticket, i](int t) {
       if (t != 0) bad_ticket = true;
       if (seq.load() != i) ordered = false;
       seq.store(i + 1);
@@ -91,146 +91,146 @@ void TestSingleTicketFifo() {
 
   Signal* last = packets.back()->done;
   last->retain();
-  for (auto* p : packets) queue->Submit(p);
-  last->Wait();
+  for (auto* p : packets) queue->submit(p);
+  last->wait();
   last->release();
 
-  Check(ordered.load() && !bad_ticket.load() && seq.load() == kPackets,
+  check(ordered.load() && !bad_ticket.load() && seq.load() == kPackets,
         "single-ticket packets ran in order with ticket 0");
-  Pass("single-ticket fifo");
+  pass("single-ticket fifo");
 }
 
 // ---- a multi-ticket packet runs every ticket exactly once ----
-void TestMultiTicketFanout() {
+void testMultiTicketFanout() {
   constexpr int kTickets = 64;
   TestCmd cmd;
-  Agent agent(4);
-  Queue* queue = agent.NewQueue();
+  Pool pool(4);
+  Queue* queue = pool.newQueue();
 
   std::atomic<int64_t> total{0};
   std::atomic<int64_t> sum{0};
-  auto* p = agent.NewPacket(&cmd, kTickets, {});
-  p->work = [&total, &sum](int i) {
+  auto* p = pool.newPacket(&cmd, kTickets, {});
+  p->task = [&total, &sum](int i) {
     total.fetch_add(1);
     sum.fetch_add(i);
   };
-  SubmitAndWait(queue, p);
+  submitAndWait(queue, p);
 
   int64_t expected = static_cast<int64_t>(kTickets) * (kTickets - 1) / 2;
-  Check(total.load() == kTickets && sum.load() == expected,
+  check(total.load() == kTickets && sum.load() == expected,
         "all 64 tickets executed exactly once");
-  Pass("multi-ticket fanout");
+  pass("multi-ticket fanout");
 }
 
 // ---- a single-ticket command after a kernel gets ticket 0, not a stale one ----
-void TestKernelThenCommandTicket() {
+void testKernelThenCommandTicket() {
   TestCmd kernel_cmd;
   TestCmd cmd;
-  Agent agent(4);
-  Queue* queue = agent.NewQueue();
+  Pool pool(4);
+  Queue* queue = pool.newQueue();
 
-  auto* kp = agent.NewPacket(&kernel_cmd, 4, {});
-  kp->work = [](int i) {
+  auto* kp = pool.newPacket(&kernel_cmd, 4, {});
+  kp->task = [](int i) {
     // Larger i sleeps longer, so the worker holding ticket 3 finishes last and
     // drives the continuation to the next packet.
     std::this_thread::sleep_for(std::chrono::milliseconds(i * 20));
   };
-  queue->Submit(kp);
+  queue->submit(kp);
 
   std::atomic<int> cmd_ticket{-1};
-  auto* cp = agent.NewPacket(&cmd, 1, {});
-  cp->work = [&cmd_ticket](int i) { cmd_ticket = i; };
-  SubmitAndWait(queue, cp);
+  auto* cp = pool.newPacket(&cmd, 1, {});
+  cp->task = [&cmd_ticket](int i) { cmd_ticket = i; };
+  submitAndWait(queue, cp);
 
-  Check(cmd_ticket.load() == 0, "single-ticket command after kernel ran with ticket 0");
-  Pass("kernel-then-command ticket");
+  check(cmd_ticket.load() == 0, "single-ticket command after kernel ran with ticket 0");
+  pass("kernel-then-command ticket");
 }
 
 // ---- an in-flight dependency creates an edge and the waiter honours it ----
-void TestPendingDepCreatesEdge() {
+void testPendingDepCreatesEdge() {
   TestCmd gate_cmd;
   TestCmd waiter_cmd;
-  Agent agent(3);
-  Queue* queue = agent.NewQueue();
+  Pool pool(3);
+  Queue* queue = pool.newQueue();
 
   Latch started;
   Latch release;
-  auto* gate = agent.NewPacket(&gate_cmd, 1, {});
-  gate->work = [&started, &release](int) {
-    started.Open();
-    release.Wait();
+  auto* gate = pool.newPacket(&gate_cmd, 1, {});
+  gate->task = [&started, &release](int) {
+    started.open();
+    release.wait();
   };
   Signal* gate_done = gate->done;
   gate_done->retain();
-  queue->Submit(gate);
-  started.Wait();  // gate is now in-flight
+  queue->submit(gate);
+  started.wait();  // gate is now in-flight
 
   std::atomic<bool> ran{false};
-  auto* watchdog = agent.NewPacket(&waiter_cmd, 1, {&gate_cmd});
+  auto* watchdog = pool.newPacket(&waiter_cmd, 1, {&gate_cmd});
   bool has_edge = !watchdog->deps.empty();
-  watchdog->work = [&ran](int) { ran = true; };
+  watchdog->task = [&ran](int) { ran = true; };
   Signal* wd_done = watchdog->done;
   wd_done->retain();
-  queue->Submit(watchdog);
+  queue->submit(watchdog);
 
-  Check(!ran.load(), "dependent parked while dependency in-flight");
+  check(!ran.load(), "dependent parked while dependency in-flight");
 
-  release.Open();
-  gate_done->Wait();
+  release.open();
+  gate_done->wait();
   gate_done->release();
-  wd_done->Wait();
+  wd_done->wait();
   wd_done->release();
 
-  Check(has_edge, "pending dependency created an edge");
-  Check(ran.load(), "dependent ran after dependency completed");
-  Pass("pending dependency creates edge");
+  check(has_edge, "pending dependency created an edge");
+  check(ran.load(), "dependent ran after dependency completed");
+  pass("pending dependency creates edge");
 }
 
 // ---- a completed dependency creates no edge ----
-void TestCompletedDepCreatesNoEdge() {
+void testCompletedDepCreatesNoEdge() {
   TestCmd finished;
   TestCmd later_cmd;
-  Agent agent(2);
-  Queue* queue = agent.NewQueue();
+  Pool pool(2);
+  Queue* queue = pool.newQueue();
 
-  auto* first = agent.NewPacket(&finished, 1, {});
-  first->work = [](int) {};
-  SubmitAndWait(queue, first);
+  auto* first = pool.newPacket(&finished, 1, {});
+  first->task = [](int) {};
+  submitAndWait(queue, first);
 
   std::atomic<bool> ran{false};
-  auto* later = agent.NewPacket(&later_cmd, 1, {&finished});
+  auto* later = pool.newPacket(&later_cmd, 1, {&finished});
   bool no_edge = later->deps.empty();
-  later->work = [&ran](int) { ran = true; };
-  SubmitAndWait(queue, later);
+  later->task = [&ran](int) { ran = true; };
+  submitAndWait(queue, later);
 
-  Check(no_edge, "waiting on a completed event added no edge");
-  Check(ran.load(), "the later packet ran");
-  Pass("completed dependency creates no edge");
+  check(no_edge, "waiting on a completed event added no edge");
+  check(ran.load(), "the later packet ran");
+  pass("completed dependency creates no edge");
 }
 
 // ---- a zero-ticket packet (marker) completes ----
-void TestMarker() {
+void testMarker() {
   TestCmd cmd;
-  Agent agent(2);
-  Queue* queue = agent.NewQueue();
+  Pool pool(2);
+  Queue* queue = pool.newQueue();
 
-  auto* p = agent.NewPacket(&cmd, 0, {});
+  auto* p = pool.newPacket(&cmd, 0, {});
   Signal* done = p->done;
   done->retain();
-  queue->Submit(p);
-  done->Wait();
-  Check(done->IsDone(), "marker's done fired");
+  queue->submit(p);
+  done->wait();
+  check(done->isDone(), "marker's done fired");
   done->release();
-  Pass("marker");
+  pass("marker");
 }
 
 // ---- concurrent submission from several threads all completes ----
-void TestConcurrentSubmit() {
+void testConcurrentSubmit() {
   constexpr int kThreads = 4, kPerThread = 25, kTotal = kThreads * kPerThread;
   std::vector<TestCmd> cmds(kTotal);
-  Agent agent(4);
+  Pool pool(4);
   std::vector<Queue*> queues;
-  for (int i = 0; i < 4; ++i) queues.push_back(agent.NewQueue());
+  for (int i = 0; i < 4; ++i) queues.push_back(pool.newQueue());
 
   std::atomic<int> completed{0};
   std::vector<std::thread> threads;
@@ -238,9 +238,9 @@ void TestConcurrentSubmit() {
     threads.emplace_back([&, t] {
       for (int i = 0; i < kPerThread; ++i) {
         int idx = t * kPerThread + i;
-        auto* p = agent.NewPacket(&cmds[idx], 1, {});
-        p->work = [&completed](int) { completed.fetch_add(1); };
-        queues[idx % 4]->Submit(p);
+        auto* p = pool.newPacket(&cmds[idx], 1, {});
+        p->task = [&completed](int) { completed.fetch_add(1); };
+        queues[idx % 4]->submit(p);
       }
     });
   }
@@ -250,12 +250,12 @@ void TestConcurrentSubmit() {
   while (completed.load() != kTotal && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  Check(completed.load() == kTotal, "all concurrent packets completed");
-  Pass("concurrent submit");
+  check(completed.load() == kTotal, "all concurrent packets completed");
+  pass("concurrent submit");
 }
 
-// ---- get_ticket CAS hands out each ticket exactly once under contention ----
-void TestGetTicketRace() {
+// ---- getTicket CAS hands out each ticket exactly once under contention ----
+void testGetTicketRace() {
   constexpr int kIters = 2000;
   constexpr int kThreads = 8;
   for (int iter = 0; iter < kIters; ++iter) {
@@ -269,59 +269,137 @@ void TestGetTicketRace() {
       th.emplace_back([&] {
         ready.fetch_add(1);
         while (!go.load(std::memory_order_acquire)) {}
-        if (p.get_ticket().has_value()) valid.fetch_add(1);
+        if (p.getTicket().has_value()) valid.fetch_add(1);
       });
     }
     while (ready.load() != kThreads) {}
     go.store(true, std::memory_order_release);
     for (auto& t : th) t.join();
     if (valid.load() != 1) {
-      Check(false, "get_ticket handed out duplicate/missing ticket under contention");
+      check(false, "getTicket handed out duplicate/missing ticket under contention");
       return;
     }
   }
-  Pass("get_ticket race");
+  pass("getTicket race");
 }
 
 // ---- a continuation packet runs its work exactly once ----
-void TestContinuationRunsOnce() {
+void testContinuationRunsOnce() {
   TestCmd first;
   TestCmd second;
-  Agent agent(2);
-  Queue* queue = agent.NewQueue();
+  Pool pool(2);
+  Queue* queue = pool.newQueue();
 
   std::atomic<int> first_count{0};
   std::atomic<int> second_count{0};
 
-  auto* p1 = agent.NewPacket(&first, 1, {});
-  p1->work = [&first_count](int) { first_count.fetch_add(1); };
-  queue->Submit(p1);
+  auto* p1 = pool.newPacket(&first, 1, {});
+  p1->task = [&first_count](int) { first_count.fetch_add(1); };
+  queue->submit(p1);
 
-  auto* p2 = agent.NewPacket(&second, 1, {});
-  p2->work = [&second_count](int) { second_count.fetch_add(1); };
+  auto* p2 = pool.newPacket(&second, 1, {});
+  p2->task = [&second_count](int) { second_count.fetch_add(1); };
   Signal* done = p2->done;
   done->retain();
-  queue->Submit(p2);
-  done->Wait();
+  queue->submit(p2);
+  done->wait();
   done->release();
 
-  Check(first_count.load() == 1 && second_count.load() == 1,
+  check(first_count.load() == 1 && second_count.load() == 1,
         "each single-ticket packet ran exactly once");
-  Pass("continuation runs once");
+  pass("continuation runs once");
+}
+
+// ---- a multi-ticket packet with slow work engages multiple workers ----
+void testMultiTicketParallelism() {
+  constexpr int kTickets = 4;
+  TestCmd cmd;
+  Pool pool(4);
+  Queue* queue = pool.newQueue();
+
+  std::atomic<int> active{0};
+  std::atomic<int> max_active{0};
+  auto* p = pool.newPacket(&cmd, kTickets, {});
+  p->task = [&active, &max_active](int) {
+    int now = active.fetch_add(1) + 1;
+    int seen = max_active.load(std::memory_order_relaxed);
+    while (now > seen &&
+           !max_active.compare_exchange_weak(seen, now, std::memory_order_relaxed)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    active.fetch_sub(1);
+  };
+  submitAndWait(queue, p);
+
+  check(max_active.load() >= 2, "multi-ticket packet engaged multiple workers concurrently");
+  pass("multi-ticket parallelism");
+}
+
+// ---- a head parked on two deps dispatches once both complete, in any order ----
+void testMultiDepPark() {
+  TestCmd dep1_cmd;
+  TestCmd dep2_cmd;
+  TestCmd waiter_cmd;
+  Pool pool(2);
+  Queue* q1 = pool.newQueue();
+  Queue* q2 = pool.newQueue();
+  Queue* q3 = pool.newQueue();
+
+  Latch release_dep1;
+  Latch release_dep2;
+
+  auto* dep1 = pool.newPacket(&dep1_cmd, 1, {});
+  dep1->task = [&release_dep1](int) { release_dep1.wait(); };
+  auto* dep2 = pool.newPacket(&dep2_cmd, 1, {});
+  dep2->task = [&release_dep2](int) { release_dep2.wait(); };
+
+  Signal* dep1_done = dep1->done;
+  Signal* dep2_done = dep2->done;
+  dep1_done->retain();
+  dep2_done->retain();
+  q1->submit(dep1);
+  q2->submit(dep2);
+
+  std::atomic<int> ran{0};
+  auto* waiter = pool.newPacket(&waiter_cmd, 1, {&dep1_cmd, &dep2_cmd});
+  bool both_edges = waiter->deps.size() == 2;
+  waiter->task = [&ran](int) { ran.fetch_add(1); };
+  Signal* wd = waiter->done;
+  wd->retain();
+  q3->submit(waiter);
+
+  check(!ran.load(), "waiter parked while both deps pending");
+
+  release_dep2.open();
+  dep2_done->wait();
+  check(!ran.load(), "waiter still parked after only one dep completed");
+
+  release_dep1.open();
+  dep1_done->wait();
+  wd->wait();
+  wd->release();
+  dep1_done->release();
+  dep2_done->release();
+
+  check(both_edges, "waiter has two dependency edges");
+  check(ran.load() == 1, "waiter ran exactly once after both deps completed");
+  pass("multi-dep park");
 }
 
 }  // namespace
 
 int main() {
-  TestSingleTicketFifo();
-  TestMultiTicketFanout();
-  TestKernelThenCommandTicket();
-  TestPendingDepCreatesEdge();
-  TestCompletedDepCreatesNoEdge();
-  TestMarker();
-  TestConcurrentSubmit();
-  TestGetTicketRace();
-  TestContinuationRunsOnce();
+  testSingleTicketFifo();
+  testMultiTicketFanout();
+  testKernelThenCommandTicket();
+  testPendingDepCreatesEdge();
+  testCompletedDepCreatesNoEdge();
+  testMarker();
+  testConcurrentSubmit();
+  testGetTicketRace();
+  testContinuationRunsOnce();
+  testMultiTicketParallelism();
+  testMultiDepPark();
 
   if (g_failures.load() != 0) {
     printf("\n%d check(s) failed\n", g_failures.load());

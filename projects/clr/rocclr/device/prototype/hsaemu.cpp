@@ -5,8 +5,7 @@
 
 namespace amd::device::prototype {
 
-// ================================================================================================
-void Signal::Notify() {
+void Signal::notify() {
   std::vector<Callback> waiters;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -21,12 +20,12 @@ void Signal::Notify() {
   }
 }
 
-void Signal::Wait() {
+void Signal::wait() {
   std::unique_lock<std::mutex> lock(lock_);
   cv_.wait(lock, [this] { return value_.load(std::memory_order_acquire) == 0; });
 }
 
-void Signal::OnDone(Callback on_done) {
+void Signal::onDone(Callback on_done) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (value_.load(std::memory_order_acquire) != 0) {
@@ -37,28 +36,27 @@ void Signal::OnDone(Callback on_done) {
   on_done();
 }
 
-// ================================================================================================
-Queue::Queue(Agent& agent) : agent_(agent) {}
+Queue::Queue(Pool& pool) : pool_(pool) {}
 
-void Queue::Submit(Packet* packet) {
+void Queue::submit(Packet* packet) {
   packet->queue = this;
   {
     std::lock_guard<std::mutex> lock(lock_);
     packets_.push_back(packet);
   }
-  agent_.Submit(NextWorkPacket(false));
+  pool_.submit(nextTaskPacket(false));
 }
 
-Packet* Queue::NextWorkPacket(bool isDone) {
-  Packet* packet = NextPacket(isDone);
+Packet* Queue::nextTaskPacket(bool isDone) {
+  Packet* packet = nextPacket(isDone);
   while (packet && packet->num_tickets == 0) {
-    agent_.DonePacket(packet);
-    packet = NextPacket(true);
+    pool_.donePacket(packet);
+    packet = nextPacket(true);
   }
   return packet;
 }
 
-Packet* Queue::NextPacket(bool isDone) {
+Packet* Queue::nextPacket(bool isDone) {
   Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -76,13 +74,12 @@ Packet* Queue::NextPacket(bool isDone) {
       packet->deps.clear();
       waiting_ready_ = false;
     } else {
-      // reset the deps when packet become head
       auto& deps = packet->deps;
       size_t num_waiting = deps.size();
       size_t new_num_waiting = 0;
       for (size_t idx = 0; idx < num_waiting; idx++) {
         auto* dep = packet->deps[idx];
-        if (dep->IsDone()) {
+        if (dep->isDone()) {
           dep->release();
         } else {
           deps[new_num_waiting++] = dep;
@@ -104,7 +101,7 @@ Packet* Queue::NextPacket(bool isDone) {
   }
 
   for (size_t idx = 0; idx < num_waiting; idx++) {
-    packet->deps[idx]->OnDone([this] {
+    packet->deps[idx]->onDone([this] {
       {
         std::lock_guard<std::mutex> lock(lock_);
         if (--num_waiting_ != 0) {
@@ -112,20 +109,19 @@ Packet* Queue::NextPacket(bool isDone) {
         }
         waiting_ready_ = true;
       }
-      agent_.Submit(NextWorkPacket(false));
+      pool_.submit(nextTaskPacket(false));
     });
   }
   return {};
 }
 
-// ================================================================================================
-Agent::Agent(uint32_t workers) {
+Pool::Pool(uint32_t workers) {
   for (uint32_t i = 0; i < workers; ++i) {
-    workers_.emplace_back(&Agent::Loop, this);
+    workers_.emplace_back(&Pool::loop, this);
   }
 }
 
-Agent::~Agent() {
+Pool::~Pool() {
   {
     std::lock_guard<std::mutex> lock(lock_);
     shutdown_ = true;
@@ -138,81 +134,79 @@ Agent::~Agent() {
   }
 }
 
-void Agent::Submit(Packet* task) {
-  if (task == nullptr) {
+void Pool::submit(Packet* packet) {
+  if (packet == nullptr) {
     return;
   }
   {
     std::lock_guard<std::mutex> lock(lock_);
-    tasks_.push_back(task);
+    packets_.push_back(packet);
   }
   cv_.notify_one();
 }
 
-void Agent::Loop(Agent* agent) {
+void Pool::loop(Pool* pool) {
   for (;;) {
     Queue* queue = nullptr;
-    Packet* task = nullptr;
+    Packet* packet = nullptr;
     Ticket ticket = std::nullopt;
     {
-      std::unique_lock<std::mutex> lock(agent->lock_);
-      agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
-      if (agent->shutdown_) {
+      std::unique_lock<std::mutex> lock(pool->lock_);
+      pool->cv_.wait(lock, [pool] { return pool->shutdown_ || !pool->packets_.empty(); });
+      if (pool->shutdown_) {
         return;
       }
-      task = agent->tasks_.front();
-      ticket = task->get_ticket();
+      packet = pool->packets_.front();
+      ticket = packet->getTicket();
       if (ticket.value_or(0) == 0) {
-        // last or null ticket, take ownership from tasks_
-        agent->tasks_.pop_front();
+        pool->packets_.pop_front();
       } else {
-        task->owners += 1;
+        packet->owners += 1;
       }
-      queue = task->queue;
+      queue = packet->queue;
     }
     bool notified = false;
-    // Get the next task from queue and execute it if possible
-    while (task) {
+    while (packet) {
       while (ticket.has_value()) {
         if (!notified && ticket.value() != 0) {
-          agent->cv_.notify_one();
+          pool->cv_.notify_one();
           notified = true;
         }
-        task->work(ticket.value());
-        ticket = task->get_ticket();
+        packet->task(ticket.value());
+        ticket = packet->getTicket();
       }
-      if (task->owners.fetch_sub(1) == 1) {
-        agent->DonePacket(task);
-        task = queue->NextWorkPacket(true);
-        if (task != nullptr) {
-          ticket = task->get_ticket();
+      if (packet->owners.fetch_sub(1) == 1) {
+        pool->donePacket(packet);
+        packet = queue->nextTaskPacket(true);
+        if (packet != nullptr) {
+          ticket = packet->getTicket();
           if (ticket != 0) {
-            task->owners += 1;
-            agent->Submit(task);
+            packet->owners += 1;
+            pool->submit(packet);
             notified = true;
           }
         }
       } else {
-        task = nullptr;
+        packet = nullptr;
       }
     }
   }
 }
 
-Queue* Agent::NewQueue() {
+Queue* Pool::newQueue() {
   std::lock_guard<std::mutex> lock(lock_);
   queues_.emplace_back(new Queue(*this));
   return queues_.back().get();
 }
 
-Packet* Agent::NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list) {
+Packet* Pool::newPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list) {
   auto* packet = new Packet;
   cmd->retain();
   packet->cmd = cmd;
   Signal* done = new Signal();
   packet->num_tickets = num_tickets;
   packet->done = done;
-  packet->work = nullptr;
+  packet->task = nullptr;
   packet->deps.reserve(wait_list.size());
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -228,12 +222,12 @@ Packet* Agent::NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_lis
   return packet;
 }
 
-void Agent::DonePacket(Packet* packet) {
+void Pool::donePacket(Packet* packet) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     event_signals_.erase(packet->cmd);
   }
-  packet->done->Notify();
+  packet->done->notify();
   packet->cmd->release();
   packet->done->release();
   delete packet;

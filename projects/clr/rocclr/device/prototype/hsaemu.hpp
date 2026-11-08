@@ -16,9 +16,8 @@
 #include <unordered_map>
 #include <vector>
 
-//! Standalone builds (hsaemu_test.cpp) cannot pull in rocclr's headers, so they
-//! get a local stand-in with the same contract: starts at 1, deletes itself
-//! when the last reference goes away.
+//! Standalone builds (hsaemu_test.cpp) get a local stand-in with the same
+//! contract: starts at 1, deletes itself when the last reference goes away.
 #ifdef PROTOTYPE_STANDALONE
 namespace amd {
 class ReferenceCountedObject {
@@ -53,13 +52,11 @@ class ReferenceCountedObject {
 
 namespace amd::device::prototype {
 
-class Agent;  // forward declaration for Packet::Retire
+class Pool;
 
-//! hsa_signal_t: starts armed (1), drops to done (0) once, never back.
-//! Subscribers registered after the drop run immediately, which is what makes
-//! a park-then-subscribe sequence free of lost wakeups.
-//! Lifetime follows amd::ReferenceCountedObject, like ProfilingSignal: whoever
-//! holds a pointer retains it, and the last release deletes the signal.
+//! hsa_signal_t: armed (1) drops to done (0) once. Subscribers registered
+//! after the drop run immediately, so a park-then-subscribe never loses a
+//! wakeup.
 class Signal : public amd::ReferenceCountedObject {
  public:
   using Callback = std::function<void()>;
@@ -68,14 +65,10 @@ class Signal : public amd::ReferenceCountedObject {
   Signal(const Signal&) = delete;
   Signal& operator=(const Signal&) = delete;
 
-  void Notify();
-  bool IsDone() const { return value_.load(std::memory_order_acquire) == 0; }
-
-  //! Blocks the calling thread. Workers must never call this.
-  void Wait();
-
-  //! Runs |on_done| once, inline if the signal is already done.
-  void OnDone(Callback on_done);
+  void notify();
+  bool isDone() const { return value_.load(std::memory_order_acquire) == 0; }
+  void wait();
+  void onDone(Callback on_done);
 
  private:
   std::atomic<int32_t> value_{1};
@@ -94,7 +87,7 @@ using Ticket = std::optional<uint32_t>;
 struct Packet {
   amd::ReferenceCountedObject* cmd = nullptr;
   std::vector<Signal*> deps;
-  std::function<void(int)> work;
+  std::function<void(int)> task;
   Queue* queue = nullptr;
   Signal* done = nullptr;
 
@@ -105,7 +98,7 @@ struct Packet {
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
 
-  Ticket get_ticket() {
+  Ticket getTicket() {
     if (num_tickets.load(std::memory_order_relaxed) == 0) {
       return std::nullopt;
     }
@@ -120,52 +113,48 @@ struct Packet {
   }
 };
 
-//! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs
-//! at a time, in submission order. A head whose deps are not done parks the
-//! queue and releases its worker.
+//! In-order queue, the counterpart of an hsa_queue_t. One packet runs at a
+//! time in submission order; a head whose deps are not done parks the queue.
 class Queue {
  public:
-  explicit Queue(Agent& agent);
+  explicit Queue(Pool& pool);
 
-  void Submit(Packet* packet);
-  Packet* NextPacket(bool isDone);
-  Packet* NextWorkPacket(bool isDone);
+  void submit(Packet* packet);
+  Packet* nextPacket(bool isDone);
+  Packet* nextTaskPacket(bool isDone);
 
  private:
-  Agent& agent_;
+  Pool& pool_;
   std::mutex lock_;
   std::deque<Packet*> packets_;
-  bool busy_ = false;       //!< a packet is running on a worker
-  size_t num_waiting_ = 0;  //!< subscriptions outstanding for the head; nonzero = parked
-  //! The head's outstanding deps all fired, so it may dispatch without a rescan.
-  bool waiting_ready_ = false;
+  bool busy_ = false;           //!< a packet is running on a worker
+  size_t num_waiting_ = 0;      //!< subscriptions outstanding for the head; nonzero = parked
+  bool waiting_ready_ = false;  //!< the head's deps all fired; dispatch without a rescan
 };
 
-//! Worker pool plus the queues and signals it owns. One agent per device.
-class Agent {
+//! Worker pool plus the queues and signals it owns.
+class Pool {
  public:
-  explicit Agent(uint32_t workers);
-  ~Agent();
-  Agent(const Agent&) = delete;
-  Agent& operator=(const Agent&) = delete;
+  explicit Pool(uint32_t workers);
+  ~Pool();
+  Pool(const Pool&) = delete;
+  Pool& operator=(const Pool&) = delete;
 
-  //! Runs |task| on a worker. Never blocks.
-  void Submit(Packet* task);
+  void submit(Packet* packet);
 
-  Queue* NewQueue();
+  Queue* newQueue();
 
-  Packet* NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list);
-  void DonePacket(Packet* packet);
+  Packet* newPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list);
+  void donePacket(Packet* packet);
 
  private:
-  static void Loop(Agent* agent);
+  static void loop(Pool* pool);
 
   std::mutex lock_;
   std::condition_variable cv_;
-  std::deque<Packet*> tasks_;
-  //! Completion signal per command address. An entry exists exactly while its
-  //! command has not completed, and it holds a reference on the command, so the
-  //! key cannot be recycled while the entry is reachable.
+  std::deque<Packet*> packets_;
+  //! Completion signal per in-flight command. The entry holds a reference on
+  //! the command, so the key address cannot be recycled while the entry lives.
   std::unordered_map<const amd::ReferenceCountedObject*, Signal*> event_signals_;
   std::vector<std::unique_ptr<Queue>> queues_;
   std::vector<std::thread> workers_;
