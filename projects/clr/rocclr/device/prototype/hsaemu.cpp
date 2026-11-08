@@ -1,6 +1,7 @@
 // PROTOTYPE: software stand-in for the slice of HSA that rocclr's ROCm
 // backend relies on.
 #include "device/prototype/hsaemu.hpp"
+#include <cstdint>
 
 namespace amd::device::prototype {
 
@@ -91,7 +92,7 @@ Packet* Queue::Pump(bool isAgent) {
 
   if (dispatch) {
     // Fast path for marker
-    if (!packet->work) {
+    if (packet->num_tickets == 0) {
       agent_.DonePacket(packet);
       {
         std::lock_guard<std::mutex> lock(lock_);
@@ -100,7 +101,7 @@ Packet* Queue::Pump(bool isAgent) {
       return Pump(isAgent);
     }
     packet->queue = this;
-    if (isAgent) {
+    if (isAgent && packet->num_tickets == 1) {
       // Avoid submit to the agent_, less lock
       return packet;
     } else {
@@ -146,42 +147,47 @@ Agent::~Agent() {
 }
 
 void Agent::Submit(Packet* task) {
+  uint32_t num_tickets;
   {
     std::lock_guard<std::mutex> lock(lock_);
     tasks_.push_back(std::move(task));
-    ++pending_;
+    num_tickets = task->num_tickets;
   }
-  cv_.notify_one();
-}
-
-void Agent::WaitIdle() {
-  std::unique_lock<std::mutex> lock(lock_);
-  idle_cv_.wait(lock, [this] { return pending_ == 0; });
+  if (num_tickets == 1) {
+    cv_.notify_one();
+  } else {
+    cv_.notify_all();
+  }
 }
 
 void Agent::Loop(Agent* agent) {
   for (;;) {
+    Queue* queue = nullptr;
     Packet* task = nullptr;
+    uint32_t ticket = 0;
     {
       std::unique_lock<std::mutex> lock(agent->lock_);
       agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
-      if (agent->tasks_.empty()) {
+      if (agent->shutdown_) {
         return;
       }
       task = agent->tasks_.front();
-      agent->tasks_.pop_front();
+      ticket = task->num_tickets.fetch_sub(1);
+      ticket -= 1;
+      if (ticket == 0) {
+        agent->tasks_.pop_front();
+      }
+      queue = task->queue;
     }
     // Get the next task from queue and execute it if possible
     while (task) {
-      task->work();
-      auto* queue = task->queue;
-      agent->DonePacket(task);
-      task = queue->Pump(true);
-    }
-    {
-      std::lock_guard<std::mutex> lock(agent->lock_);
-      if (--agent->pending_ == 0) {
-        agent->idle_cv_.notify_all();
+      task->work(ticket);
+      if (task->num_rest_tickets.fetch_sub(1) == 1) {
+        agent->DonePacket(task);
+        task = queue->Pump(true);
+        ticket = 0;
+      } else {
+        task = nullptr;
       }
     }
   }
@@ -193,12 +199,15 @@ Queue* Agent::NewQueue() {
   return queues_.back().get();
 }
 
-Packet* Agent::NewPacket(Key* cmd, const KeyList& wait_list) {
+Packet* Agent::NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list) {
   auto* packet = new Packet;
   cmd->retain();
   packet->cmd = cmd;
   Signal* done = new Signal();
+  packet->num_tickets = num_tickets;
+  packet->num_rest_tickets = num_tickets;
   packet->done = done;
+  packet->work = nullptr;
   packet->deps.reserve(wait_list.size());
   {
     std::lock_guard<std::mutex> lock(lock_);

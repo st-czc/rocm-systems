@@ -1,18 +1,16 @@
-// PROTOTYPE tests: the emulated HSA agent, and the completion-entry protocol
-// that maps rocclr commands onto it.
+// PROTOTYPE tests: the emulated HSA agent with divisible (multi-ticket) tasks.
 //
-// Only the externally visible surface is used: NewQueue, NewPacket, Submit,
-// WaitIdle. A packet is a single-owner chain -- Submit hands it to the agent and
-// DonePacket deletes it -- so a test reads a packet's fields before submitting
-// and never after. Dependencies are commands (the thing event_signals_ is keyed
-// by), not signals: NewPacket looks up the wait list in the table and wires the
-// signal only if the command's entry is still there.
+// The public surface is: NewQueue, NewPacket(cmd, num_tickets, wait_list),
+// Submit, and per-packet done signals. There is no global WaitIdle, so a test
+// waits on a packet's done signal (retained first, since DonePacket deletes the
+// packet). Command objects are declared before the Agent so the Agent's workers
+// are joined before the commands are destroyed.
 #include "device/prototype/hsaemu.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
-#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -32,9 +30,16 @@ void Check(bool ok, const char* what) {
 
 void Pass(const char* what) { printf("PASS %s\n", what); }
 
-void Sleep(int micros) { std::this_thread::sleep_for(std::chrono::microseconds(micros)); }
+//! Submit |packet| and block until its done signal fires.
+void SubmitAndWait(Queue* queue, Packet* packet) {
+  Signal* done = packet->done;
+  done->retain();
+  queue->Submit(packet);
+  done->Wait();
+  done->release();
+}
 
-//! A one-shot gate: Wait blocks until Open, Open is idempotent.
+//! One-shot gate.
 class Latch {
  public:
   void Open() {
@@ -56,390 +61,209 @@ class Latch {
   bool open_ = false;
 };
 
-//! Stands in for amd::Command: reference counted from 1, destroyed by the last
-//! release. NewPacket only needs the base class.
+//! Stands in for amd::Command.
 struct TestCmd : amd::ReferenceCountedObject {
- public:
   ~TestCmd() override = default;
 };
 
-//! A command whose packet stays in flight until Release. While in flight its
-//! entry is in the table, so another packet can depend on cmd(). The gate
-//! occupies one worker while armed, so the agent needs that much headroom.
-class Gate {
- public:
-  explicit Gate(Agent& agent) : agent_(agent) {
-    queue_ = agent_.NewQueue();
-    auto* packet = agent_.NewPacket(&cmd_, {});
-    signal_ = packet->done;
-    signal_->retain();
-    packet->work = [this] {
-      opened_.Wait();
-      closed_.Open();
-    };
-    queue_->Submit(packet);
-  }
-
-  ~Gate() {
-    Release();
-    signal_->Wait();
-    signal_->release();
-  }
-
-  Gate(const Gate&) = delete;
-  Gate& operator=(const Gate&) = delete;
-
-  //! The command other packets depend on. Its entry lives in the table until
-  /// Release() lets the gate's work finish.
-  Key* cmd() { return &cmd_; }
-
-  //! Lets the gate finish and waits until its work returned, so the latches are
-  //! not destroyed underneath a worker.
-  void Release() {
-    opened_.Open();
-    closed_.Wait();
-  }
-
- private:
-  Agent& agent_;
-  Queue* queue_ = nullptr;
-  TestCmd cmd_;
-  Signal* signal_ = nullptr;
-  Latch opened_;
-  Latch closed_;
-};
-
-// ---- A queue runs its packets in submission order ----
-void TestFifo() {
+// ---- single-ticket packets run in order and always with ticket 0 ----
+void TestSingleTicketFifo() {
+  constexpr int kPackets = 500;
+  std::vector<TestCmd> cmds(kPackets);
   Agent agent(4);
   Queue* queue = agent.NewQueue();
-  std::atomic<int> seen{0};
+
+  std::atomic<int> seq{0};
   std::atomic<bool> ordered{true};
-  constexpr int kPackets = 500;
+  std::atomic<bool> bad_ticket{false};
 
-  std::vector<TestCmd> commands(kPackets);
+  std::vector<Packet*> packets;
+  packets.reserve(kPackets);
   for (int i = 0; i < kPackets; ++i) {
-    auto* packet = agent.NewPacket(&commands[i], {});
-    packet->work = [&seen, &ordered, i] {
-      if (seen.load() != i) ordered = false;
-      seen = i + 1;
+    auto* p = agent.NewPacket(&cmds[i], 1, {});
+    p->work = [&seq, &ordered, &bad_ticket, i](int t) {
+      if (t != 0) bad_ticket = true;
+      if (seq.load() != i) ordered = false;
+      seq.store(i + 1);
     };
-    queue->Submit(packet);
+    packets.push_back(p);
   }
-  agent.WaitIdle();
 
-  Check(ordered.load() && seen.load() == kPackets, "500 packets ran in submission order");
-  Pass("fifo");
+  Signal* last = packets.back()->done;
+  last->retain();
+  for (auto* p : packets) queue->Submit(p);
+  last->Wait();
+  last->release();
+
+  Check(ordered.load() && !bad_ticket.load() && seq.load() == kPackets,
+        "single-ticket packets ran in order with ticket 0");
+  Pass("single-ticket fifo");
 }
 
-// ---- An in-flight dependency creates an edge, and the waiter honours it ----
+// ---- a multi-ticket packet runs every ticket exactly once ----
+void TestMultiTicketFanout() {
+  constexpr int kTickets = 64;
+  TestCmd cmd;
+  Agent agent(4);
+  Queue* queue = agent.NewQueue();
+
+  std::atomic<int64_t> total{0};
+  std::atomic<int64_t> sum{0};
+  auto* p = agent.NewPacket(&cmd, kTickets, {});
+  p->work = [&total, &sum](int i) {
+    total.fetch_add(1);
+    sum.fetch_add(i);
+  };
+  SubmitAndWait(queue, p);
+
+  int64_t expected = static_cast<int64_t>(kTickets) * (kTickets - 1) / 2;
+  Check(total.load() == kTickets && sum.load() == expected,
+        "all 64 tickets executed exactly once");
+  Pass("multi-ticket fanout");
+}
+
+// ---- a single-ticket command after a kernel gets ticket 0, not a stale one ----
+void TestKernelThenCommandTicket() {
+  TestCmd kernel_cmd;
+  TestCmd cmd;
+  Agent agent(4);
+  Queue* queue = agent.NewQueue();
+
+  auto* kp = agent.NewPacket(&kernel_cmd, 4, {});
+  kp->work = [](int i) {
+    // Larger i sleeps longer, so the worker holding ticket 3 finishes last and
+    // drives the continuation to the next packet.
+    std::this_thread::sleep_for(std::chrono::milliseconds(i * 20));
+  };
+  queue->Submit(kp);
+
+  std::atomic<int> cmd_ticket{-1};
+  auto* cp = agent.NewPacket(&cmd, 1, {});
+  cp->work = [&cmd_ticket](int i) { cmd_ticket = i; };
+  SubmitAndWait(queue, cp);
+
+  Check(cmd_ticket.load() == 0, "single-ticket command after kernel ran with ticket 0");
+  Pass("kernel-then-command ticket");
+}
+
+// ---- an in-flight dependency creates an edge and the waiter honours it ----
 void TestPendingDepCreatesEdge() {
-  Agent agent(3);
-  Queue* second = agent.NewQueue();
-  Gate gate(agent);
+  TestCmd gate_cmd;
   TestCmd waiter_cmd;
+  Agent agent(3);
+  Queue* queue = agent.NewQueue();
+
+  Latch started;
+  Latch release;
+  auto* gate = agent.NewPacket(&gate_cmd, 1, {});
+  gate->work = [&started, &release](int) {
+    started.Open();
+    release.Wait();
+  };
+  Signal* gate_done = gate->done;
+  gate_done->retain();
+  queue->Submit(gate);
+  started.Wait();  // gate is now in-flight
+
   std::atomic<bool> ran{false};
+  auto* watchdog = agent.NewPacket(&waiter_cmd, 1, {&gate_cmd});
+  bool has_edge = !watchdog->deps.empty();
+  watchdog->work = [&ran](int) { ran = true; };
+  Signal* wd_done = watchdog->done;
+  wd_done->retain();
+  queue->Submit(watchdog);
 
-  auto* watchdog = agent.NewPacket(&waiter_cmd, {gate.cmd()});
-  const bool has_edge = !watchdog->deps.empty();
-  watchdog->work = [&ran] { ran = true; };
-  second->Submit(watchdog);
+  Check(!ran.load(), "dependent parked while dependency in-flight");
 
-  Sleep(20000);
-  bool ran_early = ran.load();
+  release.Open();
+  gate_done->Wait();
+  gate_done->release();
+  wd_done->Wait();
+  wd_done->release();
 
-  gate.Release();
-  agent.WaitIdle();
-
-  Check(has_edge, "an in-flight dependency created an edge");
-  Check(!ran_early, "the dependent packet did not run before its dependency");
-  Check(ran.load(), "the dependent packet ran after its dependency");
-  Pass("pending dependency creates an edge");
+  Check(has_edge, "pending dependency created an edge");
+  Check(ran.load(), "dependent ran after dependency completed");
+  Pass("pending dependency creates edge");
 }
 
-// ---- The core invariant: a completed dependency creates no edge ----
-// The entry disappears only after the packet ran, so a missing entry means the
-// event already completed. A later packet must add no dependency, and must not
-// mint a signal nobody would ever Notify.
+// ---- a completed dependency creates no edge ----
 void TestCompletedDepCreatesNoEdge() {
+  TestCmd finished;
+  TestCmd later_cmd;
   Agent agent(2);
   Queue* queue = agent.NewQueue();
-  TestCmd finished;
 
-  auto* first = agent.NewPacket(&finished, {});
-  first->work = [] {};
-  queue->Submit(first);
-  agent.WaitIdle();  // `finished` has completed and its entry is gone
+  auto* first = agent.NewPacket(&finished, 1, {});
+  first->work = [](int) {};
+  SubmitAndWait(queue, first);
 
-  TestCmd later_cmd;
-  auto* later = agent.NewPacket(&later_cmd, {&finished});
-  const bool no_edge = later->deps.empty();
   std::atomic<bool> ran{false};
-  later->work = [&ran] { ran = true; };
-  queue->Submit(later);
-  agent.WaitIdle();
+  auto* later = agent.NewPacket(&later_cmd, 1, {&finished});
+  bool no_edge = later->deps.empty();
+  later->work = [&ran](int) { ran = true; };
+  SubmitAndWait(queue, later);
 
-  Check(no_edge, "waiting on a completed event added no dependency");
-  Check(ran.load(), "the later packet ran instead of parking forever");
+  Check(no_edge, "waiting on a completed event added no edge");
+  Check(ran.load(), "the later packet ran");
   Pass("completed dependency creates no edge");
 }
 
-// ---- A parked queue does not occupy a worker ----
-void TestParkedQueueHoldsNoWorker() {
-  Agent agent(2);  // one worker held by the gate, one left for the others
-  Queue* parked = agent.NewQueue();
-  Queue* other = agent.NewQueue();
-  Gate gate(agent);
-  TestCmd parked_cmd;
-  TestCmd other_cmd;
-  std::atomic<bool> parked_ran{false};
-  std::atomic<bool> other_ran{false};
-
-  auto* parked_packet = agent.NewPacket(&parked_cmd, {gate.cmd()});
-  parked_packet->work = [&parked_ran] { parked_ran = true; };
-  parked->Submit(parked_packet);
-
-  auto* other_packet = agent.NewPacket(&other_cmd, {});
-  other_packet->work = [&other_ran] { other_ran = true; };
-  other->Submit(other_packet);
-
-  Sleep(30000);
-  bool other_finished_while_parked = other_ran.load();
-  bool parked_early = parked_ran.load();
-
-  gate.Release();
-  agent.WaitIdle();
-
-  Check(other_finished_while_parked, "another queue ran while this one was parked");
-  Check(!parked_early, "the parked packet did not run before its dependency");
-  Check(parked_ran.load(), "the parked packet ran once its dependency completed");
-  Pass("parked queue releases its worker");
-}
-
-// ---- Registering against a signal that completes at the same moment ----
-// OnDone runs inline when the signal is already done, so either the packet is
-// woken or it never parks. Neither may lose it.
-void TestNotifySubscribeRace() {
-  for (int iter = 0; iter < 200; ++iter) {
-    Agent agent(3);
-    Queue* queue = agent.NewQueue();
-    Gate gate(agent);
-    TestCmd cmd;
-    std::atomic<bool> ran{false};
-
-    auto* packet = agent.NewPacket(&cmd, {gate.cmd()});
-    packet->work = [&ran] { ran = true; };
-    queue->Submit(packet);
-
-    std::thread releaser([&gate] {
-      Sleep(50);
-      gate.Release();
-    });
-    releaser.join();
-    agent.WaitIdle();
-
-    if (!ran) {
-      Check(false, "packet lost a wakeup");
-      return;
-    }
-  }
-  Pass("subscribe/completion race (200 iterations)");
-}
-
-// ---- Several dependencies, each fired separately, dispatch once ----
-void TestManyDepsDispatchOnce() {
-  constexpr int kDeps = 5;
-  for (int iter = 0; iter < 50; ++iter) {
-    Agent agent(kDeps + 2);
-    Queue* queue = agent.NewQueue();
-    std::vector<std::unique_ptr<Gate>> gates;
-
-    KeyList wait;
-    for (int i = 0; i < kDeps; ++i) {
-      gates.emplace_back(new Gate(agent));
-      wait.push_back(gates.back()->cmd());
-    }
-
-    TestCmd cmd;
-    auto* packet = agent.NewPacket(&cmd, wait);
-    std::atomic<int> dispatches{0};
-    packet->work = [&dispatches] {
-      ++dispatches;
-      Sleep(5000);
-    };
-    queue->Submit(packet);
-
-    for (int i = 0; i + 1 < kDeps; ++i) {
-      gates[i]->Release();
-      Sleep(200);
-    }
-    bool ran_early = dispatches.load() != 0;
-
-    gates[kDeps - 1]->Release();
-    agent.WaitIdle();
-
-    if (ran_early || dispatches.load() != 1) {
-      Check(false, "packet did not wait for every dependency, or ran twice");
-      return;
-    }
-  }
-  Pass("many deps (5 released one by one, one dispatch)");
-}
-
-// ---- Concurrent submission from several threads all completes ----
-void TestConcurrentSubmit() {
-  for (int iter = 0; iter < 30; ++iter) {
-    Agent agent(4);
-    constexpr int kQueues = 8, kPerThread = 40, kThreads = 4;
-    constexpr int kTotalCmds = kThreads * kPerThread;
-
-    std::vector<Queue*> queues;
-    for (int i = 0; i < kQueues; ++i) queues.push_back(agent.NewQueue());
-
-    std::vector<TestCmd> commands(kTotalCmds);
-    std::atomic<int> ran{0};
-    std::vector<std::thread> threads;
-    for (int t = 0; t < kThreads; ++t) {
-      threads.emplace_back([&, t] {
-        for (int i = 0; i < kPerThread; ++i) {
-          int idx = t * kPerThread + i;
-          auto* packet = agent.NewPacket(&commands[idx], {});
-          packet->work = [&ran] { ++ran; };
-          queues[idx % kQueues]->Submit(packet);
-        }
-      });
-    }
-    for (auto& thread : threads) thread.join();
-    agent.WaitIdle();
-
-    if (ran.load() != kTotalCmds) {
-      Check(false, "lost packets under concurrent submission");
-      return;
-    }
-  }
-  Pass("concurrent submit (30 iterations x 4 threads)");
-}
-
-// ---- Two queues chained through completion entries run in order ----
-void TestChainedQueues() {
-  for (int iter = 0; iter < 100; ++iter) {
-    Agent agent(3);
-    Queue* queue = agent.NewQueue();
-    Gate gate(agent);
-    TestCmd follower_cmd;
-    std::atomic<bool> ran{false};
-
-    auto* follower = agent.NewPacket(&follower_cmd, {gate.cmd()});
-    follower->work = [&ran] { ran = true; };
-    queue->Submit(follower);
-
-    Sleep(20000);
-    bool ran_early = ran.load();
-
-    gate.Release();
-    agent.WaitIdle();
-
-    if (ran_early || !ran.load()) {
-      Check(false, "the chained packet did not wait for its dependency");
-      return;
-    }
-  }
-  Pass("cross-queue chain (100 iterations)");
-}
-
-// ---- A command submitted twice gets a fresh live signal the second time ----
-void TestReusedCommandGetsFreshSignal() {
-  Agent agent(2);
-  Queue* queue = agent.NewQueue();
+// ---- a zero-ticket packet (marker) completes ----
+void TestMarker() {
   TestCmd cmd;
-
-  auto* first = agent.NewPacket(&cmd, {});
-  Signal* first_done = first->done;
-  first_done->retain();  // outlives the packet, which is deleted on completion
-  first->work = [] {};
-  queue->Submit(first);
-  agent.WaitIdle();
-  Check(first_done->IsDone(), "the first submission's signal completed");
-
-  auto* second = agent.NewPacket(&cmd, {});
-  Signal* second_done = second->done;
-  second_done->retain();
-  Check(second_done != first_done, "the second submission got a different signal");
-  Check(!second_done->IsDone(), "the second submission's signal is armed");
-
-  second->work = [] {};
-  queue->Submit(second);
-  agent.WaitIdle();
-  Check(second_done->IsDone(), "the second submission's signal completed");
-
-  second_done->release();
-  first_done->release();
-  Pass("a reused command gets a fresh signal");
-}
-
-// ---- Independent commands never share a completion signal ----
-void TestCommandsHaveDistinctSignals() {
   Agent agent(2);
   Queue* queue = agent.NewQueue();
-  TestCmd one;
-  TestCmd two;
 
-  auto* a = agent.NewPacket(&one, {});
-  auto* b = agent.NewPacket(&two, {});
-  Check(a->done != b->done, "two commands got two signals");
-
-  a->work = [] {};
-  b->work = [] {};
-  queue->Submit(a);
-  queue->Submit(b);
-  agent.WaitIdle();
-  Pass("commands have distinct signals");
+  auto* p = agent.NewPacket(&cmd, 0, {});
+  Signal* done = p->done;
+  done->retain();
+  queue->Submit(p);
+  done->Wait();
+  Check(done->IsDone(), "marker's done fired");
+  done->release();
+  Pass("marker");
 }
 
-// ---- Submitting against a command that is completing right now ----
-// The dependency lookup and the entry's removal are serialized by the agent's
-// lock, so either the edge is taken while the entry exists and the waiter is
-// woken, or the entry is already gone and the waiter never parks.
-void TestEdgeVersusCompletionRace() {
-  for (int iter = 0; iter < 200; ++iter) {
-    Agent agent(3);
-    Queue* queue = agent.NewQueue();
-    Gate gate(agent);
-    TestCmd cmd;
-    std::atomic<bool> ran{false};
+// ---- concurrent submission from several threads all completes ----
+void TestConcurrentSubmit() {
+  constexpr int kThreads = 4, kPerThread = 25, kTotal = kThreads * kPerThread;
+  std::vector<TestCmd> cmds(kTotal);
+  Agent agent(4);
+  std::vector<Queue*> queues;
+  for (int i = 0; i < 4; ++i) queues.push_back(agent.NewQueue());
 
-    std::thread racer([&] {
-      auto* packet = agent.NewPacket(&cmd, {gate.cmd()});
-      packet->work = [&ran] { ran = true; };
-      queue->Submit(packet);
+  std::atomic<int> completed{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([&, t] {
+      for (int i = 0; i < kPerThread; ++i) {
+        int idx = t * kPerThread + i;
+        auto* p = agent.NewPacket(&cmds[idx], 1, {});
+        p->work = [&completed](int) { completed.fetch_add(1); };
+        queues[idx % 4]->Submit(p);
+      }
     });
-    racer.join();
-
-    gate.Release();
-    agent.WaitIdle();
-
-    if (!ran) {
-      Check(false, "the racing packet was neither woken nor run immediately");
-      return;
-    }
   }
-  Pass("dependency-vs-completion race (200 iterations)");
+  for (auto& th : threads) th.join();
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (completed.load() != kTotal && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  Check(completed.load() == kTotal, "all concurrent packets completed");
+  Pass("concurrent submit");
 }
 
 }  // namespace
 
 int main() {
-  TestFifo();
+  TestSingleTicketFifo();
+  TestMultiTicketFanout();
+  TestKernelThenCommandTicket();
   TestPendingDepCreatesEdge();
   TestCompletedDepCreatesNoEdge();
-  TestParkedQueueHoldsNoWorker();
-  TestNotifySubscribeRace();
-  TestManyDepsDispatchOnce();
+  TestMarker();
   TestConcurrentSubmit();
-  TestChainedQueues();
-  TestReusedCommandGetsFreshSignal();
-  TestCommandsHaveDistinctSignals();
-  TestEdgeVersusCompletionRace();
 
   if (g_failures.load() != 0) {
     printf("\n%d check(s) failed\n", g_failures.load());

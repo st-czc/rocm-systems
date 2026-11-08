@@ -37,7 +37,7 @@ class VirtualCPU : public VirtualDevice {
   void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) override { Submit(cmd); }
   void submitMapMemory(amd::MapMemoryCommand& cmd) override { Submit(cmd); }
   void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) override { Submit(cmd); }
-  void submitKernel(amd::NDRangeKernelCommand& command) override { Submit(command); }
+  void submitKernel(amd::NDRangeKernelCommand& command) override;
   void submitNativeFn(amd::NativeFnCommand& cmd) override { Submit(cmd); }
   void submitMarker(amd::Marker& cmd) override;
   void submitAccumulate(amd::AccumulateCommand& cmd) override { Submit(cmd); }

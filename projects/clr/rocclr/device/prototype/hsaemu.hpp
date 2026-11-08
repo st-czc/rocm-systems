@@ -91,9 +91,12 @@ class Queue;
 struct Packet {
   amd::ReferenceCountedObject* cmd = nullptr;
   std::vector<Signal*> deps;
-  std::function<void()> work;
+  std::function<void(int)> work;
   Queue* queue = nullptr;
   Signal* done = nullptr;
+
+  std::atomic<uint32_t> num_tickets;
+  std::atomic<uint32_t> num_rest_tickets;
 
   Packet() = default;
   Packet(const Packet&) = delete;
@@ -131,12 +134,9 @@ class Agent {
   //! Runs |task| on a worker. Never blocks.
   void Submit(Packet* task);
 
-  //! Returns once no work is queued or running.
-  void WaitIdle();
-
   Queue* NewQueue();
 
-  Packet* NewPacket(Key* cmd, const KeyList& wait_list);
+  Packet* NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list);
   void DonePacket(Packet* packet);
 
  private:
@@ -152,7 +152,6 @@ class Agent {
   std::unordered_map<const amd::ReferenceCountedObject*, Signal*> event_signals_;
   std::vector<std::unique_ptr<Queue>> queues_;
   std::vector<std::thread> workers_;
-  uint64_t pending_ = 0;
   bool shutdown_ = false;
 };
 

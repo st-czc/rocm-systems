@@ -4,21 +4,26 @@
 
 #include <atomic>
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <random>
+#include <cstdio>
 
 #include "device/prototype/hsaemu.hpp"
 #include "os/os.hpp"
+#include "platform/kernel.hpp"
 
 namespace amd::device::prototype {
 namespace {
 
 std::atomic<uint64_t> g_queue_id{0};
 
-void SimulateWork() {
+void SimulateWork(void* p, int i) {
   thread_local std::mt19937 rng{std::random_device{}()};
   std::uniform_int_distribution<int> dist(1, 20);
+  std::printf("Packet[%p]: A %4d\n", p, i);
   std::this_thread::sleep_for(std::chrono::milliseconds(dist(rng)));
+  std::printf("Packet[%p]: B %4d\n", p, i);
 }
 
 }  // namespace
@@ -49,9 +54,21 @@ void VirtualCPU::Submit(amd::Command& cmd) {
   for (amd::Event* event : cmd.eventWaitList()) {
     wait_list.push_back(event);
   }
-  auto packet = agent_.NewPacket(&cmd, wait_list);
+  auto packet = agent_.NewPacket(&cmd, 1, wait_list);
 
-  packet->work = [] { SimulateWork(); };
+  packet->work = [packet](int i) { SimulateWork(static_cast<void*>(packet), i); };
+
+  queue_->Submit(packet);
+}
+
+void VirtualCPU::submitKernel(NDRangeKernelCommand& cmd) {
+  std::vector<amd::ReferenceCountedObject*> wait_list;
+  for (amd::Event* event : cmd.eventWaitList()) {
+    wait_list.push_back(event);
+  }
+  auto packet = agent_.NewPacket(&cmd, 32, wait_list);
+
+  packet->work = [packet](int i) { SimulateWork(static_cast<void*>(packet), i); };
 
   queue_->Submit(packet);
 }
@@ -61,9 +78,7 @@ void VirtualCPU::submitMarker(amd::Marker& cmd) {
   for (amd::Event* event : cmd.eventWaitList()) {
     wait_list.push_back(event);
   }
-  auto packet = agent_.NewPacket(&cmd, wait_list);
-
-  packet->work = nullptr;
+  auto packet = agent_.NewPacket(&cmd, 0, wait_list);
 
   Signal* done = packet->done;
 
