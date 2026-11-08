@@ -30,7 +30,7 @@ void Signal::wait() {
 }
 
 void Signal::onDone(Callback on_done) {
-  {
+  if (!isDone()) {
     std::lock_guard<std::mutex> lock(lock_);
     if (!isDone()) {
       waiters_.push_back(std::move(on_done));
