@@ -47,7 +47,7 @@ void VirtualCPU::UpdateBatchState(amd::Command* list) {
 void VirtualCPU::Submit(amd::Command& cmd) {
   std::vector<amd::ReferenceCountedObject*> wait_list;
   for (amd::Event* event : cmd.eventWaitList()) {
-    wait_list.push_back(static_cast<amd::Command*>(event));
+    wait_list.push_back(event);
   }
   auto packet = agent_.NewPacket(&cmd, wait_list);
 
@@ -59,7 +59,7 @@ void VirtualCPU::Submit(amd::Command& cmd) {
 void VirtualCPU::submitMarker(amd::Marker& cmd) {
   std::vector<amd::ReferenceCountedObject*> wait_list;
   for (amd::Event* event : cmd.eventWaitList()) {
-    wait_list.push_back(static_cast<amd::Command*>(event));
+    wait_list.push_back(event);
   }
   auto packet = agent_.NewPacket(&cmd, wait_list);
 

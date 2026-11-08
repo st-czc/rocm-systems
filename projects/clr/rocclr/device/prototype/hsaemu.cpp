@@ -47,13 +47,13 @@ void Queue::Submit(Packet* packet) {
   Pump();
 }
 
-AgentTask Queue::Pump(bool isAgent) {
+Packet* Queue::Pump(bool isAgent) {
   bool dispatch = false;
   Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
-      return AgentTask(nullptr);
+      return {};
     }
     packet = packets_.front();
     if (waiting_ready_) {
@@ -87,27 +87,28 @@ AgentTask Queue::Pump(bool isAgent) {
   }
 
   if (dispatch) {
-    auto task = [this, packet](bool isAgent) -> AgentTask {
-      if (packet->work) {
-        packet->work();
-      }
-      // OnDone Pump here, notify other workers
+    // Fast path for marker
+    if (!packet->work) {
       agent_.DonePacket(packet);
       {
         std::lock_guard<std::mutex> lock(lock_);
         busy_ = false;
       }
       return Pump(isAgent);
+    }
+    packet->next_task = [this]() -> Packet* {
+      {
+        std::lock_guard<std::mutex> lock(lock_);
+        busy_ = false;
+      }
+      return Pump(true);
     };
     if (isAgent) {
       // Avoid submit to the agent_, less lock
-      return AgentTask(task);
-    } else if (packet->work) {
-      agent_.Submit(AgentTask(task));
-      return AgentTask();
+      return packet;
     } else {
-      // Fast path for marker when ready
-      return task(isAgent);
+      agent_.Submit(packet);
+      return {};
     }
   }
 
@@ -124,7 +125,7 @@ AgentTask Queue::Pump(bool isAgent) {
       Pump();
     });
   }
-  return AgentTask();
+  return {};
 }
 
 // ================================================================================================
@@ -147,7 +148,7 @@ Agent::~Agent() {
   }
 }
 
-void Agent::Submit(AgentTask task) {
+void Agent::Submit(Packet* task) {
   {
     std::lock_guard<std::mutex> lock(lock_);
     tasks_.push_back(std::move(task));
@@ -163,19 +164,22 @@ void Agent::WaitIdle() {
 
 void Agent::Loop(Agent* agent) {
   for (;;) {
-    AgentTask task;
+    Packet* task = nullptr;
     {
       std::unique_lock<std::mutex> lock(agent->lock_);
       agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
       if (agent->tasks_.empty()) {
         return;
       }
-      task = std::move(agent->tasks_.front());
+      task = agent->tasks_.front();
       agent->tasks_.pop_front();
     }
     // Get the next task from queue and execute it if possible
     while (task) {
-      task = task(true);
+      task->work();
+      auto next_task = std::move(task->next_task);
+      agent->DonePacket(task);
+      task = next_task();
     }
     {
       std::lock_guard<std::mutex> lock(agent->lock_);

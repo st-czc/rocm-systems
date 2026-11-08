@@ -86,35 +86,17 @@ class Signal : public amd::ReferenceCountedObject {
 using Key = amd::ReferenceCountedObject;
 using KeyList = std::vector<Key*>;
 
-//! One entry in a queue: the work, the signals it must observe first, and the
-//! signal it raises when it is finished. A packet holds a reference on every
-//! signal it names, so none can be freed while the packet is alive.
+
 struct Packet {
   amd::ReferenceCountedObject* cmd = nullptr;
   std::vector<Signal*> deps;
   std::function<void()> work;
+  std::function<Packet*()> next_task = nullptr;
   Signal* done = nullptr;
 
   Packet() = default;
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
-};
-
-
-class AgentTask {
-  std::function<AgentTask(bool isAgent)> task_;
-
- public:
-  AgentTask() : task_(nullptr) {}
-  AgentTask(std::function<AgentTask(bool isAgent)> task) : task_(std::move(task)) {}
-
-  operator bool() { return task_ != nullptr; }
-  AgentTask operator()(bool isAgent) {
-    if (task_) {
-      return task_(isAgent);
-    }
-    return AgentTask();
-  }
 };
 
 //! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs
@@ -128,7 +110,7 @@ class Queue {
 
  private:
   //! Starts the head if it may run. Idempotent and thread safe.
-  AgentTask Pump(bool isAgent = false);
+  Packet* Pump(bool isAgent = false);
 
   Agent& agent_;
   std::mutex lock_;
@@ -148,7 +130,7 @@ class Agent {
   Agent& operator=(const Agent&) = delete;
 
   //! Runs |task| on a worker. Never blocks.
-  void Submit(AgentTask task);
+  void Submit(Packet *task);
 
   //! Returns once no work is queued or running.
   void WaitIdle();
@@ -164,7 +146,7 @@ class Agent {
   std::mutex lock_;
   std::condition_variable cv_;
   std::condition_variable idle_cv_;
-  std::deque<AgentTask> tasks_;
+  std::deque<Packet *> tasks_;
   //! Completion signal per command address. An entry exists exactly while its
   //! command has not completed, and it holds a reference on the command, so the
   //! key cannot be recycled while the entry is reachable.
