@@ -1,6 +1,6 @@
 // PROTOTYPE tests: the emulated HSA agent with divisible (multi-ticket) tasks.
 //
-// The public surface is: newQueue, newPacket(cmd, num_tickets, wait_list),
+// The public surface is: newQueue, newPacket(cmd, num_tickets, event_wait_list),
 // submit, and per-packet done signals. A test waits on a packet's done signal
 // (retained first, since donePacket deletes the packet). Command objects are
 // declared before the Pool so the Pool's workers are joined before the commands
@@ -32,7 +32,7 @@ void pass(const char* what) { printf("PASS %s\n", what); }
 
 //! Submits |packet| and blocks until its done signal fires.
 void submitAndWait(Queue* queue, Packet* packet) {
-  Signal* done = packet->done;
+  Signal* done = packet->signal;
   done->retain();
   queue->submit(packet);
   done->wait();
@@ -89,7 +89,7 @@ void testSingleTicketFifo() {
     packets.push_back(p);
   }
 
-  Signal* last = packets.back()->done;
+  Signal* last = packets.back()->signal;
   last->retain();
   for (auto* p : packets) queue->submit(p);
   last->wait();
@@ -160,16 +160,16 @@ void testPendingDepCreatesEdge() {
     started.open();
     release.wait();
   };
-  Signal* gate_done = gate->done;
+  Signal* gate_done = gate->signal;
   gate_done->retain();
   queue->submit(gate);
   started.wait();  // gate is now in-flight
 
   std::atomic<bool> ran{false};
   auto* watchdog = pool.newPacket(&waiter_cmd, 1, {&gate_cmd});
-  bool has_edge = !watchdog->deps.empty();
+  bool has_edge = !watchdog->signal_wait_list.empty();
   watchdog->task = [&ran](int) { ran = true; };
-  Signal* wd_done = watchdog->done;
+  Signal* wd_done = watchdog->signal;
   wd_done->retain();
   queue->submit(watchdog);
 
@@ -199,7 +199,7 @@ void testCompletedDepCreatesNoEdge() {
 
   std::atomic<bool> ran{false};
   auto* later = pool.newPacket(&later_cmd, 1, {&finished});
-  bool no_edge = later->deps.empty();
+  bool no_edge = later->signal_wait_list.empty();
   later->task = [&ran](int) { ran = true; };
   submitAndWait(queue, later);
 
@@ -215,7 +215,7 @@ void testMarker() {
   Queue* queue = pool.newQueue();
 
   auto* p = pool.newPacket(&cmd, 0, {});
-  Signal* done = p->done;
+  Signal* done = p->signal;
   done->retain();
   queue->submit(p);
   done->wait();
@@ -258,9 +258,9 @@ void testConcurrentSubmit() {
 void testGetTicketRace() {
   constexpr int kIters = 2000;
   constexpr int kThreads = 8;
+  TestCmd cmd;
   for (int iter = 0; iter < kIters; ++iter) {
-    Packet p;
-    p.num_tickets = 1;
+    Packet p(&cmd, 1);
     std::atomic<int> valid{0};
     std::atomic<int> ready{0};
     std::atomic<bool> go{false};
@@ -299,7 +299,7 @@ void testContinuationRunsOnce() {
 
   auto* p2 = pool.newPacket(&second, 1, {});
   p2->task = [&second_count](int) { second_count.fetch_add(1); };
-  Signal* done = p2->done;
+  Signal* done = p2->signal;
   done->retain();
   queue->submit(p2);
   done->wait();
@@ -335,7 +335,7 @@ void testMultiTicketParallelism() {
   pass("multi-ticket parallelism");
 }
 
-// ---- a head parked on two deps dispatches once both complete, in any order ----
+// ---- a head parked on two signal_wait_list dispatches once both complete, in any order ----
 void testMultiDepPark() {
   TestCmd dep1_cmd;
   TestCmd dep2_cmd;
@@ -353,8 +353,8 @@ void testMultiDepPark() {
   auto* dep2 = pool.newPacket(&dep2_cmd, 1, {});
   dep2->task = [&release_dep2](int) { release_dep2.wait(); };
 
-  Signal* dep1_done = dep1->done;
-  Signal* dep2_done = dep2->done;
+  Signal* dep1_done = dep1->signal;
+  Signal* dep2_done = dep2->signal;
   dep1_done->retain();
   dep2_done->retain();
   q1->submit(dep1);
@@ -362,13 +362,13 @@ void testMultiDepPark() {
 
   std::atomic<int> ran{0};
   auto* waiter = pool.newPacket(&waiter_cmd, 1, {&dep1_cmd, &dep2_cmd});
-  bool both_edges = waiter->deps.size() == 2;
+  bool both_edges = waiter->signal_wait_list.size() == 2;
   waiter->task = [&ran](int) { ran.fetch_add(1); };
-  Signal* wd = waiter->done;
+  Signal* wd = waiter->signal;
   wd->retain();
   q3->submit(waiter);
 
-  check(!ran.load(), "waiter parked while both deps pending");
+  check(!ran.load(), "waiter parked while both signal_wait_list pending");
 
   release_dep2.open();
   dep2_done->wait();
@@ -382,7 +382,7 @@ void testMultiDepPark() {
   dep2_done->release();
 
   check(both_edges, "waiter has two dependency edges");
-  check(ran.load() == 1, "waiter ran exactly once after both deps completed");
+  check(ran.load() == 1, "waiter ran exactly once after both signal_wait_list completed");
   pass("multi-dep park");
 }
 

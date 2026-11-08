@@ -48,11 +48,13 @@ class ReferenceCountedObject {
 }  // namespace amd
 #else
 #include "top.hpp"
+#include "platform/command.hpp"
 #endif
 
 namespace amd::device::prototype {
 
 class Pool;
+class Queue;
 
 //! hsa_signal_t: armed (1) drops to done (0) once. Subscribers registered
 //! after the drop run immediately, so a park-then-subscribe never loses a
@@ -73,27 +75,35 @@ class Signal : public amd::ReferenceCountedObject {
  private:
   std::mutex lock_;
   std::atomic<int32_t> value_{1};
-  std::vector<Callback> waiters_;
+  std::vector<Callback> callbacks_;
 };
 
-using Key = amd::ReferenceCountedObject;
-using KeyList = std::vector<Key*>;
+#ifdef PROTOTYPE_STANDALONE
+using Event = amd::ReferenceCountedObject;
+using EventWaitList = std::vector<Event*>;
+#else
+using EventWaitList = Event::EventWaitList;
+#endif
 
-class Queue;
+using SignalWaitList = std::vector<Signal*>;
 
 using Ticket = std::optional<uint32_t>;
 
 struct Packet {
-  amd::ReferenceCountedObject* cmd = nullptr;
-  std::vector<Signal*> deps;
-  std::function<void(int)> task;
-  Queue* queue = nullptr;
-  Signal* done = nullptr;
+  Queue* queue{};
 
-  std::atomic<uint32_t> owners = 1;
+  std::function<void(int)> task;
+
+  Event* event{};
+  Signal* signal{};
+  SignalWaitList signal_wait_list;
+
+  std::atomic<uint32_t> num_owners;
   std::atomic<uint32_t> num_tickets;
 
-  Packet() = default;
+  Packet(Event* event, uint32_t num_tickets);
+  ~Packet();
+
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
 
@@ -112,23 +122,22 @@ struct Packet {
   }
 };
 
-//! In-order queue, the counterpart of an hsa_queue_t. One packet runs at a
-//! time in submission order; a head whose deps are not done parks the queue.
+//! In-order queue, the counterpart of an hsa_queue_t.
 class Queue {
  public:
   explicit Queue(Pool& pool);
 
   void submit(Packet* packet);
-  Packet* nextPacket(bool isDone);
-  Packet* nextTaskPacket(bool isDone);
+  Packet* nextPacket(bool busy_done);
+  Packet* nextTaskPacket(bool busy_done);
 
  private:
   Pool& pool_;
   std::mutex lock_;
   std::deque<Packet*> packets_;
-  bool busy_ = false;           //!< a packet is running on a worker
-  size_t num_waiting_ = 0;      //!< subscriptions outstanding for the head; nonzero = parked
-  bool waiting_ready_ = false;  //!< the head's deps all fired; dispatch without a rescan
+  bool busy_ = false;
+  bool waiting_ready_ = false;
+  size_t num_waiting_ = 0;
 };
 
 //! Worker pool plus the queues and signals it owns.
@@ -143,21 +152,24 @@ class Pool {
 
   Queue* newQueue();
 
-  Packet* newPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_list);
+  Packet* newPacket(Event* event, uint32_t num_tickets, const EventWaitList& event_wait_list);
   void donePacket(Packet* packet);
 
  private:
   static void loop(Pool* pool);
 
-  std::mutex lock_;
-  std::condition_variable cv_;
-  std::deque<Packet*> packets_;
-  //! Completion signal per in-flight command. The entry holds a reference on
-  //! the command, so the key address cannot be recycled while the entry lives.
-  std::unordered_map<const amd::ReferenceCountedObject*, Signal*> event_signals_;
+  std::mutex queue_lock_;
   std::vector<std::unique_ptr<Queue>> queues_;
-  std::vector<std::thread> workers_;
+
+  std::mutex event_lock_;
+  std::unordered_map<const Event*, Signal*> event_signals_;
+
+  std::mutex packet_lock_;
+  std::condition_variable cv_;
+  std::deque<Packet*> ready_packets_;
+
   bool shutdown_ = false;
+  std::vector<std::thread> workers_;
 };
 
 }  // namespace amd::device::prototype

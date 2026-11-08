@@ -50,11 +50,7 @@ void VirtualCPU::updateBatchState(amd::Command* list) {
 }
 
 void VirtualCPU::submit(amd::Command& cmd) {
-  std::vector<amd::ReferenceCountedObject*> wait_list;
-  for (amd::Event* event : cmd.eventWaitList()) {
-    wait_list.push_back(event);
-  }
-  auto packet = pool_.newPacket(&cmd, 1, wait_list);
+  auto packet = pool_.newPacket(&cmd, 1, cmd.eventWaitList());
 
   packet->task = [packet](int i) { simulateWork(static_cast<void*>(packet), i); };
 
@@ -62,11 +58,7 @@ void VirtualCPU::submit(amd::Command& cmd) {
 }
 
 void VirtualCPU::submitKernel(NDRangeKernelCommand& cmd) {
-  std::vector<amd::ReferenceCountedObject*> wait_list;
-  for (amd::Event* event : cmd.eventWaitList()) {
-    wait_list.push_back(event);
-  }
-  auto packet = pool_.newPacket(&cmd, 32, wait_list);
+  auto packet = pool_.newPacket(&cmd, 32, cmd.eventWaitList());
 
   packet->task = [packet](int i) { simulateWork(static_cast<void*>(packet), i); };
 
@@ -74,25 +66,21 @@ void VirtualCPU::submitKernel(NDRangeKernelCommand& cmd) {
 }
 
 void VirtualCPU::submitMarker(amd::Marker& cmd) {
-  std::vector<amd::ReferenceCountedObject*> wait_list;
-  for (amd::Event* event : cmd.eventWaitList()) {
-    wait_list.push_back(event);
-  }
-  auto packet = pool_.newPacket(&cmd, 0, wait_list);
+  auto packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
 
-  Signal* done = packet->done;
+  Signal* signal = packet->signal;
 
   if (cmd.CpuWaitRequested()) {
-    done->retain();
+    signal->retain();
     queue_->submit(packet);
-    done->wait();
-    done->release();
+    signal->wait();
+    signal->release();
     if (auto* head = cmd.GetBatchHead()) {
       updateBatchState(head);
     }
   } else {
     if (auto* head = cmd.GetBatchHead()) {
-      done->onDone([head] { updateBatchState(head); });
+      signal->onDone([head] { updateBatchState(head); });
     }
     queue_->submit(packet);
   }
