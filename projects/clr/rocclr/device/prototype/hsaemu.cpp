@@ -150,7 +150,7 @@ void Agent::Submit(Packet* task) {
   uint32_t num_tickets;
   {
     std::lock_guard<std::mutex> lock(lock_);
-    tasks_.push_back(std::move(task));
+    tasks_.push_back(task);
     num_tickets = task->num_tickets;
   }
   if (num_tickets == 1) {
@@ -164,7 +164,7 @@ void Agent::Loop(Agent* agent) {
   for (;;) {
     Queue* queue = nullptr;
     Packet* task = nullptr;
-    uint32_t ticket = 0;
+    std::optional<uint32_t> ticket = std::nullopt;
     {
       std::unique_lock<std::mutex> lock(agent->lock_);
       agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
@@ -172,20 +172,25 @@ void Agent::Loop(Agent* agent) {
         return;
       }
       task = agent->tasks_.front();
-      ticket = task->num_tickets.fetch_sub(1);
-      ticket -= 1;
-      if (ticket == 0) {
+      ticket = task->get_ticket();
+      if (ticket.value_or(0) == 0) {
+        // last or null ticket, take ownership from tasks_
         agent->tasks_.pop_front();
+      } else {
+        task->owners += 1;
       }
       queue = task->queue;
     }
     // Get the next task from queue and execute it if possible
     while (task) {
-      task->work(ticket);
-      if (task->num_rest_tickets.fetch_sub(1) == 1) {
+      while (ticket.has_value()) {
+        task->work(ticket.value());
+        ticket = task->get_ticket();
+      }
+      if (task->owners.fetch_sub(1) == 1) {
         agent->DonePacket(task);
         task = queue->Pump(true);
-        ticket = 0;
+        ticket = task ? task->get_ticket() : std::nullopt;
       } else {
         task = nullptr;
       }
@@ -205,7 +210,6 @@ Packet* Agent::NewPacket(Key* cmd, uint32_t num_tickets, const KeyList& wait_lis
   packet->cmd = cmd;
   Signal* done = new Signal();
   packet->num_tickets = num_tickets;
-  packet->num_rest_tickets = num_tickets;
   packet->done = done;
   packet->work = nullptr;
   packet->deps.reserve(wait_list.size());

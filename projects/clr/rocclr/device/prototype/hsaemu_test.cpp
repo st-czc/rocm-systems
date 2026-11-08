@@ -254,6 +254,62 @@ void TestConcurrentSubmit() {
   Pass("concurrent submit");
 }
 
+// ---- get_ticket CAS hands out each ticket exactly once under contention ----
+void TestGetTicketRace() {
+  constexpr int kIters = 2000;
+  constexpr int kThreads = 8;
+  for (int iter = 0; iter < kIters; ++iter) {
+    Packet p;
+    p.num_tickets = 1;
+    std::atomic<int> valid{0};
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    std::vector<std::thread> th;
+    for (int t = 0; t < kThreads; ++t) {
+      th.emplace_back([&] {
+        ready.fetch_add(1);
+        while (!go.load(std::memory_order_acquire)) {}
+        if (p.get_ticket().has_value()) valid.fetch_add(1);
+      });
+    }
+    while (ready.load() != kThreads) {}
+    go.store(true, std::memory_order_release);
+    for (auto& t : th) t.join();
+    if (valid.load() != 1) {
+      Check(false, "get_ticket handed out duplicate/missing ticket under contention");
+      return;
+    }
+  }
+  Pass("get_ticket race");
+}
+
+// ---- a continuation packet runs its work exactly once ----
+void TestContinuationRunsOnce() {
+  TestCmd first;
+  TestCmd second;
+  Agent agent(2);
+  Queue* queue = agent.NewQueue();
+
+  std::atomic<int> first_count{0};
+  std::atomic<int> second_count{0};
+
+  auto* p1 = agent.NewPacket(&first, 1, {});
+  p1->work = [&first_count](int) { first_count.fetch_add(1); };
+  queue->Submit(p1);
+
+  auto* p2 = agent.NewPacket(&second, 1, {});
+  p2->work = [&second_count](int) { second_count.fetch_add(1); };
+  Signal* done = p2->done;
+  done->retain();
+  queue->Submit(p2);
+  done->Wait();
+  done->release();
+
+  Check(first_count.load() == 1 && second_count.load() == 1,
+        "each single-ticket packet ran exactly once");
+  Pass("continuation runs once");
+}
+
 }  // namespace
 
 int main() {
@@ -264,6 +320,8 @@ int main() {
   TestCompletedDepCreatesNoEdge();
   TestMarker();
   TestConcurrentSubmit();
+  TestGetTicketRace();
+  TestContinuationRunsOnce();
 
   if (g_failures.load() != 0) {
     printf("\n%d check(s) failed\n", g_failures.load());

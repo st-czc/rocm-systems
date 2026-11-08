@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -95,12 +96,26 @@ struct Packet {
   Queue* queue = nullptr;
   Signal* done = nullptr;
 
+  std::atomic<uint32_t> owners = 1;
   std::atomic<uint32_t> num_tickets;
-  std::atomic<uint32_t> num_rest_tickets;
 
   Packet() = default;
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
+
+  std::optional<uint32_t> get_ticket() {
+    if (num_tickets.load(std::memory_order_relaxed) == 0) {
+      return std::nullopt;
+    }
+    uint32_t ticket = num_tickets.load(std::memory_order_relaxed);
+    do {
+      if (ticket == 0) {
+        return std::nullopt;
+      }
+    } while (!num_tickets.compare_exchange_weak(ticket, ticket - 1, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed));
+    return ticket - 1;
+  }
 };
 
 //! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs
@@ -144,7 +159,6 @@ class Agent {
 
   std::mutex lock_;
   std::condition_variable cv_;
-  std::condition_variable idle_cv_;
   std::deque<Packet*> tasks_;
   //! Completion signal per command address. An entry exists exactly while its
   //! command has not completed, and it holds a reference on the command, so the
