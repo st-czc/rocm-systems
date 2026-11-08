@@ -52,6 +52,9 @@ Packet* Queue::Pump(bool isAgent) {
   Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
+    if (isAgent) {
+      busy_ = false;
+    }
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
       return {};
     }
@@ -96,13 +99,7 @@ Packet* Queue::Pump(bool isAgent) {
       }
       return Pump(isAgent);
     }
-    packet->next_task = [this]() -> Packet* {
-      {
-        std::lock_guard<std::mutex> lock(lock_);
-        busy_ = false;
-      }
-      return Pump(true);
-    };
+    packet->queue = this;
     if (isAgent) {
       // Avoid submit to the agent_, less lock
       return packet;
@@ -177,9 +174,9 @@ void Agent::Loop(Agent* agent) {
     // Get the next task from queue and execute it if possible
     while (task) {
       task->work();
-      auto next_task = std::move(task->next_task);
+      auto* queue = task->queue;
       agent->DonePacket(task);
-      task = next_task();
+      task = queue->Pump(true);
     }
     {
       std::lock_guard<std::mutex> lock(agent->lock_);

@@ -86,12 +86,13 @@ class Signal : public amd::ReferenceCountedObject {
 using Key = amd::ReferenceCountedObject;
 using KeyList = std::vector<Key*>;
 
+class Queue;
 
 struct Packet {
   amd::ReferenceCountedObject* cmd = nullptr;
   std::vector<Signal*> deps;
   std::function<void()> work;
-  std::function<Packet*()> next_task = nullptr;
+  Queue* queue = nullptr;
   Signal* done = nullptr;
 
   Packet() = default;
@@ -107,11 +108,9 @@ class Queue {
   explicit Queue(Agent& agent);
 
   void Submit(Packet* packet);
-
- private:
-  //! Starts the head if it may run. Idempotent and thread safe.
   Packet* Pump(bool isAgent = false);
 
+ private:
   Agent& agent_;
   std::mutex lock_;
   std::deque<Packet*> packets_;
@@ -130,7 +129,7 @@ class Agent {
   Agent& operator=(const Agent&) = delete;
 
   //! Runs |task| on a worker. Never blocks.
-  void Submit(Packet *task);
+  void Submit(Packet* task);
 
   //! Returns once no work is queued or running.
   void WaitIdle();
@@ -146,7 +145,7 @@ class Agent {
   std::mutex lock_;
   std::condition_variable cv_;
   std::condition_variable idle_cv_;
-  std::deque<Packet *> tasks_;
+  std::deque<Packet*> tasks_;
   //! Completion signal per command address. An entry exists exactly while its
   //! command has not completed, and it holds a reference on the command, so the
   //! key cannot be recycled while the entry is reachable.
