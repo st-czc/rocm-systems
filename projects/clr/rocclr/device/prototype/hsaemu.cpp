@@ -41,19 +41,28 @@ void Signal::OnDone(Callback on_done) {
 Queue::Queue(Agent& agent) : agent_(agent) {}
 
 void Queue::Submit(Packet* packet) {
+  packet->queue = this;
   {
     std::lock_guard<std::mutex> lock(lock_);
     packets_.push_back(packet);
   }
-  Pump();
+  agent_.Submit(NextWorkPacket(false));
 }
 
-Packet* Queue::Pump(bool isAgent) {
-  bool dispatch = false;
+Packet* Queue::NextWorkPacket(bool isDone) {
+  Packet* packet = NextPacket(isDone);
+  while (packet && packet->num_tickets == 0) {
+    agent_.DonePacket(packet);
+    packet = NextPacket(true);
+  }
+  return packet;
+}
+
+Packet* Queue::NextPacket(bool isDone) {
   Packet* packet = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
-    if (isAgent) {
+    if (isDone) {
       busy_ = false;
     }
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
@@ -84,33 +93,16 @@ Packet* Queue::Pump(bool isAgent) {
     if (packet->deps.empty()) {
       packets_.pop_front();
       busy_ = true;
-      dispatch = true;
     } else {
       num_waiting_ = packet->deps.size();
     }
   }
 
-  if (dispatch) {
-    // Fast path for marker
-    if (packet->num_tickets == 0) {
-      agent_.DonePacket(packet);
-      {
-        std::lock_guard<std::mutex> lock(lock_);
-        busy_ = false;
-      }
-      return Pump(isAgent);
-    }
-    packet->queue = this;
-    if (isAgent && packet->num_tickets == 1) {
-      // Avoid submit to the agent_, less lock
-      return packet;
-    } else {
-      agent_.Submit(packet);
-      return {};
-    }
+  auto num_waiting = packet->deps.size();
+  if (num_waiting == 0) {
+    return packet;
   }
 
-  auto num_waiting = packet->deps.size();
   for (size_t idx = 0; idx < num_waiting; idx++) {
     packet->deps[idx]->OnDone([this] {
       {
@@ -120,7 +112,7 @@ Packet* Queue::Pump(bool isAgent) {
         }
         waiting_ready_ = true;
       }
-      Pump();
+      agent_.Submit(NextWorkPacket(false));
     });
   }
   return {};
@@ -147,6 +139,9 @@ Agent::~Agent() {
 }
 
 void Agent::Submit(Packet* task) {
+  if (task == nullptr) {
+    return;
+  }
   uint32_t num_tickets;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -164,7 +159,7 @@ void Agent::Loop(Agent* agent) {
   for (;;) {
     Queue* queue = nullptr;
     Packet* task = nullptr;
-    std::optional<uint32_t> ticket = std::nullopt;
+    Ticket ticket = std::nullopt;
     {
       std::unique_lock<std::mutex> lock(agent->lock_);
       agent->cv_.wait(lock, [agent] { return agent->shutdown_ || !agent->tasks_.empty(); });
@@ -189,8 +184,14 @@ void Agent::Loop(Agent* agent) {
       }
       if (task->owners.fetch_sub(1) == 1) {
         agent->DonePacket(task);
-        task = queue->Pump(true);
-        ticket = task ? task->get_ticket() : std::nullopt;
+        task = queue->NextWorkPacket(true);
+        if (task != nullptr) {
+          ticket = task->get_ticket();
+          if (task->num_tickets != 0) {
+            task->owners += 1;
+            agent->Submit(task);
+          }
+        }
       } else {
         task = nullptr;
       }

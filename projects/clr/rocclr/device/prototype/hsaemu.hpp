@@ -89,6 +89,8 @@ using KeyList = std::vector<Key*>;
 
 class Queue;
 
+using Ticket = std::optional<uint32_t>;
+
 struct Packet {
   amd::ReferenceCountedObject* cmd = nullptr;
   std::vector<Signal*> deps;
@@ -103,7 +105,7 @@ struct Packet {
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
 
-  std::optional<uint32_t> get_ticket() {
+  Ticket get_ticket() {
     if (num_tickets.load(std::memory_order_relaxed) == 0) {
       return std::nullopt;
     }
@@ -126,7 +128,8 @@ class Queue {
   explicit Queue(Agent& agent);
 
   void Submit(Packet* packet);
-  Packet* Pump(bool isAgent = false);
+  Packet* NextPacket(bool isDone);
+  Packet* NextWorkPacket(bool isDone);
 
  private:
   Agent& agent_;
