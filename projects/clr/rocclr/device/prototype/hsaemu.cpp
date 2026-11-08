@@ -1,7 +1,10 @@
 // PROTOTYPE: software stand-in for the slice of HSA that rocclr's ROCm
 // backend relies on.
-#include "device/prototype/hsaemu.hpp"
+
 #include <cstdint>
+#include <future>
+
+#include "device/prototype/hsaemu.hpp"
 
 namespace amd::device::prototype {
 
@@ -14,21 +17,22 @@ void Signal::notify() {
       waiters.swap(waiters_);
     }
   }
-  cv_.notify_all();
   for (auto& waiter : waiters) {
     waiter();
   }
 }
 
 void Signal::wait() {
-  std::unique_lock<std::mutex> lock(lock_);
-  cv_.wait(lock, [this] { return value_.load(std::memory_order_acquire) == 0; });
+  auto ready = std::make_shared<std::promise<void>>();
+  auto future = ready->get_future();
+  onDone([ready] { ready->set_value(); });
+  future.wait();
 }
 
 void Signal::onDone(Callback on_done) {
   {
     std::lock_guard<std::mutex> lock(lock_);
-    if (value_.load(std::memory_order_acquire) != 0) {
+    if (!isDone()) {
       waiters_.push_back(std::move(on_done));
       return;
     }

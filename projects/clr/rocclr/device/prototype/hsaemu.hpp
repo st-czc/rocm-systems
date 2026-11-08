@@ -71,9 +71,8 @@ class Signal : public amd::ReferenceCountedObject {
   void onDone(Callback on_done);
 
  private:
-  std::atomic<int32_t> value_{1};
   std::mutex lock_;
-  std::condition_variable cv_;
+  std::atomic<int32_t> value_{1};
   std::vector<Callback> waiters_;
 };
 
