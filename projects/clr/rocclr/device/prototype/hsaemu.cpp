@@ -23,9 +23,9 @@ void Signal::notify() {
 }
 
 void Signal::wait() {
-  auto ready = std::make_shared<std::promise<void>>();
-  auto future = ready->get_future();
-  onDone([ready] { ready->set_value(); });
+  auto ready = std::promise<void>();
+  auto future = ready.get_future();
+  onDone([&ready] { ready.set_value(); });
   future.wait();
 }
 
