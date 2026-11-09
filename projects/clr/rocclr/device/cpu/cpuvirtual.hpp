@@ -99,11 +99,6 @@ class VirtualDevice : public device::VirtualDevice {
   }
 
  private:
-  //! Fills a memory object with a pattern
-  bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
-                  size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,
-                  const amd::Coord3D& size);
-
   //! The host backend implements no command.
   void Unsupported(const char* command);
 

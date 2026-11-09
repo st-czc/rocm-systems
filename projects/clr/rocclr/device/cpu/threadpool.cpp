@@ -127,10 +127,6 @@ Packet* Queue::nextPacket(bool busy_done) {
   return nullptr;
 }
 
-namespace {
-thread_local bool tls_in_async_handler = false;
-}  // namespace
-
 AsyncHandler::AsyncHandler() : thread_(&AsyncHandler::loop, this) {}
 
 AsyncHandler::~AsyncHandler() {
@@ -152,10 +148,7 @@ void AsyncHandler::post(Handler handler) {
   cv_.notify_one();
 }
 
-bool AsyncHandler::inHandler() { return tls_in_async_handler; }
-
 void AsyncHandler::loop() {
-  tls_in_async_handler = true;
   for (;;) {
     Handler handler;
     {

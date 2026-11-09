@@ -19,80 +19,15 @@
 
 namespace amd::cpu {
 
-class BlitManager final : public device::HostBlitManager {
- public:
-  BlitManager(VirtualDevice& virtualDevice) : HostBlitManager(virtualDevice) {}
-
-  virtual bool streamOpsWrite(device::Memory& memory, uint64_t value, size_t offset,
-                              size_t sizeBytes) const override {
-    return false;
-  }
-
-  virtual bool streamOpsIncrement(device::Memory& memory, uint64_t value, size_t offset,
-                                  size_t sizeBytes) const override {
-    return false;
-  }
-
-  virtual bool streamOpsDecrement(device::Memory& memory, uint64_t value, size_t offset,
-                                  size_t sizeBytes) const override {
-    return false;
-  }
-
-  virtual bool streamOpsWait(device::Memory& memory, uint64_t value, size_t offset,
-                             size_t sizeBytes, uint64_t flags, uint64_t mask) const override {
-    return false;
-  }
-
-  virtual bool batchMemOps(const void* paramArray, size_t paramSize,
-                           uint32_t count) const override {
-    return false;
-  }
-
-  virtual bool initHeap(device::Memory* heapToInitialize, device::Memory* initialBlocks,
-                        uint heapSize, uint numberOfInitialBlocks) const override {
-    return false;
-  }
-
-  virtual bool fillBuffer(device::Memory& memory, const void* pattern, size_t patternSize,
-                          const amd::Coord3D& surface, const amd::Coord3D& origin,
-                          const amd::Coord3D& size, bool entire, bool forceBlit) const override {
-    const size_t width = size[0];
-    const size_t height = size[1];
-    const size_t depth = size[2];
-
-    amd::Coord3D region{surface[1], surface[2], depth};
-    amd::Coord3D start(origin);
-    amd::BufferRect rect;
-    if (!rect.create(static_cast<size_t*>(start), static_cast<size_t*>(region), surface[0], 0)) {
-      LogError("Misaligned fill surface!");
-      return false;
-    }
-
-    // Fill one row at a time so that the row pitch of the surface is honored
-    for (size_t slice = 0; slice < depth; ++slice) {
-      for (size_t row = 0; row < height; ++row) {
-        if (!HostBlitManager::fillBuffer(memory, pattern, patternSize, surface,
-                                         amd::Coord3D{rect.offset(0, row, slice), 0, 0},
-                                         amd::Coord3D{width, 1, 1}, entire, forceBlit)) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
-};
-
 VirtualDevice::VirtualDevice(Device& device)
     : device::VirtualDevice(device),
       dev_(device),
       pool_(device.pool()),
       queue_(device.pool().newQueue(this)) {
-  blitMgr_ = new BlitManager(*this);
   LogPrintfInfo("CPU VirtualDevice created: virtual=%p device=%p", this, &device);
 }
 
 VirtualDevice::~VirtualDevice() {
-  delete blitMgr_;
   pool_.deleteQueue(this);
 }
 
@@ -121,8 +56,6 @@ void VirtualDevice::submitUnsupported(amd::Command& cmd, const char* command) {
 void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
-
-  // profilingBegin(cmd, true);
 
   size_t offset = 0;
   // Find if virtual address is a CL allocation
@@ -243,14 +176,11 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
       submitUnsupported(cmd, "ReadMemory");
       break;
   }
-  // profilingEnd();
 }
 
 void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
-
-  // profilingBegin(cmd, true);
 
   size_t offset = 0;
   // Find if virtual address is a CL allocation
@@ -295,14 +225,12 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
       if (hostMemory != nullptr) {
         // Accelerated transfer without pinning
         const address srcMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           std::memcpy(dst, srcMem, size[0]);
-          cmd.destination().signalWrite(&dev_);
         });
       } else {
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           std::memcpy(dst, src, size[0]);
-          cmd.destination().signalWrite(&dev_);
         });
       }
       break;
@@ -323,18 +251,17 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
         const address srcMem = static_cast<address>(hostMemory->cpuMap(*this));
         const amd::BufferRect srcRect(hostbufferRect);
         const amd::BufferRect dstRect(cmd.bufRect());
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + dstRect.offset(0, y, z), srcMem + srcRect.offset(0, y, z), size[0]);
             }
           }
-          cmd.destination().signalWrite(&dev_);
         });
       } else {
         const amd::BufferRect srcRect(cmd.hostRect());
         const amd::BufferRect dstRect(cmd.bufRect());
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + dstRect.offset(0, y, z),
@@ -342,7 +269,6 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
                           size[0]);
             }
           }
-          cmd.destination().signalWrite(&dev_);
         });
       }
       break;
@@ -362,7 +288,7 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
       address dst = static_cast<address>(devMem->cpuMap(*this));
       if (hostMemory != nullptr) {
         const address srcMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + firstRow + imageRowPitch * y + imageSlicePitch * z,
@@ -370,11 +296,10 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
                           size[0] * elementSize);
             }
           }
-          cmd.destination().signalWrite(&dev_);
         });
       } else {
         const size_t rowPitch = size[0] * elementSize;
-        submit(cmd, [=, &cmd]() {
+        submit(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + firstRow + imageRowPitch * y + imageSlicePitch * z,
@@ -383,7 +308,6 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
                           rowPitch);
             }
           }
-          cmd.destination().signalWrite(&dev_);
         });
       }
       break;
@@ -392,14 +316,11 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
       submitUnsupported(cmd, "WriteMemory");
       break;
   }
-  // profilingEnd();
 }
 
 void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
-
-  // profilingBegin(cmd, true);
 
   cl_command_type type = cmd.type();
   bool entire = cmd.isEntireMemory();
@@ -424,9 +345,8 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
     case CL_COMMAND_COPY_BUFFER: {
       const address src = static_cast<address>(srcDevMem->cpuMap(*this)) + cmd.srcOrigin()[0];
       address dst = static_cast<address>(dstDevMem->cpuMap(*this)) + cmd.dstOrigin()[0];
-      submit(cmd, [=, &cmd]() {
+      submit(cmd, [=]() {
         std::memcpy(dst, src, size[0]);
-        cmd.destination().signalWrite(&dev_);
       });
       break;
     }
@@ -435,13 +355,12 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
       address dst = static_cast<address>(dstDevMem->cpuMap(*this));
       const amd::BufferRect srcRect(cmd.srcRect());
       const amd::BufferRect dstRect(cmd.dstRect());
-      submit(cmd, [=, &cmd]() {
+      submit(cmd, [=]() {
         for (size_t z = 0; z < size[2]; ++z) {
           for (size_t y = 0; y < size[1]; ++y) {
             std::memcpy(dst + dstRect.offset(0, y, z), src + srcRect.offset(0, y, z), size[0]);
           }
         }
-        cmd.destination().signalWrite(&dev_);
       });
       break;
     }
@@ -457,7 +376,7 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
                               srcSlicePitch * cmd.srcOrigin()[2];
       const size_t dstFirst = cmd.dstOrigin()[0] * elementSize + dstRowPitch * cmd.dstOrigin()[1] +
                               dstSlicePitch * cmd.dstOrigin()[2];
-      submit(cmd, [=, &cmd]() {
+      submit(cmd, [=]() {
         for (size_t z = 0; z < size[2]; ++z) {
           for (size_t y = 0; y < size[1]; ++y) {
             std::memcpy(dst + dstFirst + dstRowPitch * y + dstSlicePitch * z,
@@ -465,7 +384,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
                         size[0] * elementSize);
           }
         }
-        cmd.destination().signalWrite(&dev_);
       });
       break;
     }
@@ -487,7 +405,7 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
         dstSlicePitch = dstRowPitch * size[1];
       }
       const address dst = static_cast<address>(dstDevMem->cpuMap(*this)) + cmd.dstOrigin()[0];
-      submit(cmd, [=, &cmd]() {
+      submit(cmd, [=]() {
         for (size_t z = 0; z < size[2]; ++z) {
           for (size_t y = 0; y < size[1]; ++y) {
             std::memcpy(dst + dstRowPitch * y + dstSlicePitch * z,
@@ -495,7 +413,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
                         size[0] * elementSize);
           }
         }
-        cmd.destination().signalWrite(&dev_);
       });
       break;
     }
@@ -517,7 +434,7 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
         srcSlicePitch = srcRowPitch * size[1];
       }
       address dst = static_cast<address>(dstDevMem->cpuMap(*this));
-      submit(cmd, [=, &cmd]() {
+      submit(cmd, [=]() {
         for (size_t z = 0; z < size[2]; ++z) {
           for (size_t y = 0; y < size[1]; ++y) {
             std::memcpy(dst + dstFirst + imageRowPitch * y + imageSlicePitch * z,
@@ -525,7 +442,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
                         size[0] * elementSize);
           }
         }
-        cmd.destination().signalWrite(&dev_);
       });
       break;
     }
@@ -533,7 +449,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
       submitUnsupported(cmd, "CopyMemory");
       break;
   }
-  // profilingEnd();
 }
 
 void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
@@ -553,8 +468,6 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
   };
   std::vector<CopySpan> spans;
   spans.reserve(copyOps.size());
-  std::vector<amd::Memory*> written;
-  written.reserve(copyOps.size());
 
   // Synchronize source and destination memory
   device::Memory::SyncFlags syncFlags;
@@ -571,15 +484,11 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
     srcDevMem->syncCacheFromHost(*this);
     spans.push_back({static_cast<address>(srcDevMem->cpuMap(*this)) + op.srcOffset,
                      static_cast<address>(dstDevMem->cpuMap(*this)) + op.dstOffset, op.size});
-    written.push_back(op.dstMemory);
   }
 
-  submit(cmd, [spans = std::move(spans), written = std::move(written), this]() {
+  submit(cmd, [spans = std::move(spans)]() {
     for (const auto& span : spans) {
       std::memcpy(span.dst, span.src, span.size);
-    }
-    for (auto* memory : written) {
-      memory->signalWrite(&dev_);
     }
   });
 }
@@ -601,8 +510,6 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
   };
   std::vector<WriteSpan> spans;
   spans.reserve(writeOps.size());
-  std::vector<amd::Memory*> written;
-  written.reserve(writeOps.size());
   // Sources marked kSrcAccessOrderDuringApiCall must be read before this call
   // returns, so they are snapshotted now and the task writes the snapshot.
   std::vector<std::vector<char>> snapshots;
@@ -620,16 +527,12 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
       src = snapshots.back().data();
     }
     spans.push_back({src, static_cast<address>(dstDevMem->cpuMap(*this)) + op.dst_offset, op.size});
-    written.push_back(op.dst_memory);
   }
 
-  submit(cmd, [spans = std::move(spans), written = std::move(written),
-               snapshots = std::move(snapshots), this]() {
+  submit(cmd, [spans = std::move(spans),
+               snapshots = std::move(snapshots)]() {
     for (const auto& span : spans) {
       std::memcpy(span.dst, span.src, span.size);
-    }
-    for (auto* memory : written) {
-      memory->signalWrite(&dev_);
     }
   });
 }
@@ -669,52 +572,52 @@ void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
   });
 }
 
-bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
-                               size_t patternSize, const amd::Coord3D& surface,
-                               const amd::Coord3D& origin, const amd::Coord3D& size) {
-  Memory* memory = dev().getCPUMemory(amdMemory);
-
-  bool entire = amdMemory->isEntirelyCovered(origin, size);
-  // No necessary to synchronize memory from host for CPU
-
-  bool result = false;
-
-  // Find the the right fill operation
-  switch (type) {
-    case CL_COMMAND_SVM_MEMFILL:
-    case CL_COMMAND_FILL_BUFFER: {
-      result = blitMgr().fillBuffer(*memory, pattern, patternSize, surface, origin, size, entire);
-      break;
-    }    case CL_COMMAND_FILL_IMAGE: {
-      // result = blitMgr().fillImage(*memory, pattern, origin, size, entire);
-      Unsupported("FillImage");
-      break;
-    }
-    default:
-      LogError("Unsupported command type for FillMemory!");
-      break;
-  }
-
-  if (!result) {
-    LogError("submitFillMemory failed!");
-    return false;
-  }
-
-  amdMemory->signalWrite(&dev());
-  return true;
-}
-
 void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
-  // profilingBegin(cmd, true);
+  if (cmd.type() != CL_COMMAND_SVM_MEMFILL && cmd.type() != CL_COMMAND_FILL_BUFFER) {
+    Unsupported("FillImage");
+    cmd.setStatus(CL_INVALID_OPERATION);
+    return;
+  }
 
-  submit(cmd, [this, &cmd]() {
-    fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
-               cmd.origin(), cmd.size());
+  Memory* memory = dev().getCPUMemory(&cmd.memory());
+  if (memory == nullptr) {
+    cmd.setStatus(CL_INVALID_MEM_OBJECT);
+    return;
+  }
+
+  const amd::Coord3D& surface = cmd.surface();
+  const amd::Coord3D& origin = cmd.origin();
+  const amd::Coord3D& size = cmd.size();
+  const size_t width = size[0];
+  const size_t height = size[1];
+  const size_t depth = size[2];
+
+  amd::Coord3D region{surface[1], surface[2], depth};
+  amd::Coord3D start(origin);
+  amd::BufferRect rect;
+  if (!rect.create(static_cast<size_t*>(start), static_cast<size_t*>(region), surface[0], 0)) {
+    LogError("Misaligned fill surface!");
+    cmd.setStatus(CL_INVALID_OPERATION);
+    return;
+  }
+
+  const address base = static_cast<address>(memory->cpuMap(*this));
+  const void* pattern = cmd.pattern();
+  const size_t patternSize = cmd.patternSize();
+
+  submit(cmd, [base, pattern, patternSize, width, height, depth, rect]() {
+    for (size_t slice = 0; slice < depth; ++slice) {
+      for (size_t row = 0; row < height; ++row) {
+        address dst = base + rect.offset(0, row, slice);
+        for (size_t i = 0; i < width / patternSize; ++i) {
+          std::memcpy(dst + i * patternSize, pattern, patternSize);
+        }
+      }
+    }
   });
-  // profilingEnd();
 }
 
 void VirtualDevice::submitMarker(amd::Marker& cmd) {

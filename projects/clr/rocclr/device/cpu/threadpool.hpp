@@ -129,10 +129,6 @@ class AsyncHandler {
   //! Runs |handler| on the async thread. Never blocks.
   void post(Handler handler);
 
-  //! ROCr's InAsyncSignalHandler(): true on the async thread. A handler that
-  //! would destroy what it is running under defers instead.
-  static bool inHandler();
-
  private:
   void loop();
 
