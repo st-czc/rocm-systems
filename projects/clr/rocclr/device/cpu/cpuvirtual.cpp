@@ -709,26 +709,51 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitMarker(amd::Marker& cmd) {
-  std::scoped_lock lock(execution());
+  const bool cpuWait = cmd.CpuWaitRequested();
+  amd::Command* head = nullptr;
+  Signal* signal = nullptr;
+  {
+    std::scoped_lock lock(execution());
 
-  Packet* packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
-  Signal* signal = packet->signal;
+    head = cmd.GetBatchHead();
+    Packet* packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
+    signal = packet->signal;
 
-  amd::Command* head = cmd.GetBatchHead();
-  if (head != nullptr) {
-    signal->onDone([this, head] {
-      pool_.postAsync([head] { updateBatchState(head); });
-    });
+    if (cpuWait) {
+      // The wait below outlives the packet, which drops its own reference.
+      signal->retain();
+    } else if (head != nullptr) {
+      // onDone may fire on a worker, on the app thread, or on the async thread,
+      // so it only posts.
+      signal->onDone([this, head] {
+        pool_.postAsync([head] { updateBatchState(head); });
+      });
+    }
+    queue_->submit(packet);
   }
-  queue_->submit(packet);
+
+  // The only thread that blocks on a signal is the app thread, as specified.
+  if (cpuWait) {
+    signal->wait();
+    signal->release();
+    if (head != nullptr) {
+      updateBatchState(head);
+    }
+  }
 }
 
 void VirtualDevice::updateBatchState(amd::Command* list) {
   const uint64_t now = amd::Os::timeNanos();
   for (amd::Command* current = list; current != nullptr;) {
     amd::Command* next = current->getNext();
-    if (current->status() == CL_SUBMITTED) {
-      current->setStatus(CL_RUNNING, now);
+    // A command may already be COMPLETE (failed validation) or RUNNING (a submit
+    // advanced it); both are expected. A negative status is terminal and is
+    // released without being advanced.
+    const int32_t status = current->status();
+    if (status == CL_SUBMITTED || status == CL_RUNNING) {
+      if (status == CL_SUBMITTED) {
+        current->setStatus(CL_RUNNING, now);
+      }
       current->setStatus(CL_COMPLETE, now);
     }
     current->release();
@@ -809,21 +834,21 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
   const size_t groupsPerTicket = totalGroups / numTickets;
   const size_t remainder = totalGroups % numTickets;
 
-  // The subhandler reads the argument vector directly; resolve it once here so
-  // the task captures a plain pointer.
-  void** kernelArgs = args.data();
+  // The subhandler reads the argument vector directly. The task runs after this
+  // function returns, so the task owns the vector: a bare pointer would dangle.
+  submit(cmd, numTickets,
+         [args = std::move(args), entry, state, numTickets, groupsPerTicket, remainder,
+          sharedMemBytes](int ticket) mutable {
+           // Tickets are handed out high to low, so the larger share goes to the high
+           // tickets that start first: the last `remainder` tickets take one extra.
+           const size_t t = static_cast<size_t>(ticket);
+           const bool isLarge = t >= numTickets - remainder;
+           const size_t begin = groupsPerTicket * t + (isLarge ? t - (numTickets - remainder) : 0);
+           const size_t count = groupsPerTicket + (isLarge ? 1 : 0);
 
-  submit(cmd, numTickets, [=](int ticket) {
-    // Tickets are handed out high to low, so the larger share goes to the high
-    // tickets that start first: the last `remainder` tickets take one extra.
-    const size_t t = static_cast<size_t>(ticket);
-    const bool isLarge = t >= numTickets - remainder;
-    const size_t begin = groupsPerTicket * t + (isLarge ? t - (numTickets - remainder) : 0);
-    const size_t count = groupsPerTicket + (isLarge ? 1 : 0);
-
-    NativeCpuState ticketState = state;
-    entry(kernelArgs, &ticketState, begin, begin + count, sharedMemBytes);
-  });
+           NativeCpuState ticketState = state;
+           entry(args.data(), &ticketState, begin, begin + count, sharedMemBytes);
+         });
 }
 
 void VirtualDevice::Unsupported(const char* command) {

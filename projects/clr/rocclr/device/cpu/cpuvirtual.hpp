@@ -8,6 +8,7 @@
 #define CPUVIRTUAL_HPP_
 
 #include "device/device.hpp"
+#include "platform/command.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -38,45 +39,63 @@ class VirtualDevice : public device::VirtualDevice {
   virtual void submitReadMemory(amd::ReadMemoryCommand& cmd);
   virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd);
   virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd);
-  virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) { Unsupported("CopyMemoryP2P"); }
+  virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) {
+    submitUnsupported(cmd, "CopyMemoryP2P");
+  }
   virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd);
   virtual void SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd);
   virtual void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd);
-  virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { Unsupported("MapMemory"); }
-  virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) { Unsupported("UnmapMemory"); }
+  virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { submitUnsupported(cmd, "MapMemory"); }
+  virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "UnmapMemory");
+  }
   virtual void submitKernel(amd::NDRangeKernelCommand& cmd);
-  virtual void submitNativeFn(amd::NativeFnCommand& cmd) { Unsupported("NativeFn"); }
+  virtual void submitNativeFn(amd::NativeFnCommand& cmd) { submitUnsupported(cmd, "NativeFn"); }
   virtual void submitMarker(amd::Marker& cmd);
-  virtual void submitAccumulate(amd::AccumulateCommand& cmd) { Unsupported("Accumulate"); }
+  virtual void submitAccumulate(amd::AccumulateCommand& cmd) {
+    submitUnsupported(cmd, "Accumulate");
+  }
   virtual void submitExternalSemaphoreCmd(amd::ExternalSemaphoreCmd& cmd) {
-    Unsupported("ExternalSemaphore");
+    submitUnsupported(cmd, "ExternalSemaphore");
   }
   virtual void submitFillMemory(amd::FillMemoryCommand& cmd);
   virtual void submitMigrateMemObjects(amd::MigrateMemObjectsCommand& cmd) {
-    Unsupported("MigrateMemObjects");
+    submitUnsupported(cmd, "MigrateMemObjects");
   }
   virtual void submitAcquireExtObjects(amd::AcquireExtObjectsCommand& cmd) {
-    Unsupported("AcquireExtObjects");
+    submitUnsupported(cmd, "AcquireExtObjects");
   }
   virtual void submitReleaseExtObjects(amd::ReleaseExtObjectsCommand& cmd) {
-    Unsupported("ReleaseExtObjects");
+    submitUnsupported(cmd, "ReleaseExtObjects");
   }
-  virtual void submitPerfCounter(amd::PerfCounterCommand& cmd) { Unsupported("PerfCounter"); }
+  virtual void submitPerfCounter(amd::PerfCounterCommand& cmd) {
+    submitUnsupported(cmd, "PerfCounter");
+  }
   virtual void submitThreadTraceMemObjects(amd::ThreadTraceMemObjectsCommand& cmd) {
-    Unsupported("ThreadTraceMemObjects");
+    submitUnsupported(cmd, "ThreadTraceMemObjects");
   }
-  virtual void submitThreadTrace(amd::ThreadTraceCommand& cmd) { Unsupported("ThreadTrace"); }
+  virtual void submitThreadTrace(amd::ThreadTraceCommand& cmd) {
+    submitUnsupported(cmd, "ThreadTrace");
+  }
   virtual void flush(amd::Command* list = NULL, bool wait = false);
-  virtual void submitSvmFreeMemory(amd::SvmFreeMemoryCommand& cmd) { Unsupported("SvmFreeMemory"); }
-  virtual void submitSvmCopyMemory(amd::SvmCopyMemoryCommand& cmd) { Unsupported("SvmCopyMemory"); }
-  virtual void submitSvmFillMemory(amd::SvmFillMemoryCommand& cmd) { Unsupported("SvmFillMemory"); }
-  virtual void submitSvmMapMemory(amd::SvmMapMemoryCommand& cmd) { Unsupported("SvmMapMemory"); }
-  virtual void submitSvmUnmapMemory(amd::SvmUnmapMemoryCommand& cmd) {
-    Unsupported("SvmUnmapMemory");
+  virtual void submitSvmFreeMemory(amd::SvmFreeMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmFreeMemory");
   }
-  virtual void submitSignal(amd::SignalCommand& cmd) { Unsupported("Signal"); }
+  virtual void submitSvmCopyMemory(amd::SvmCopyMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmCopyMemory");
+  }
+  virtual void submitSvmFillMemory(amd::SvmFillMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmFillMemory");
+  }
+  virtual void submitSvmMapMemory(amd::SvmMapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmMapMemory");
+  }
+  virtual void submitSvmUnmapMemory(amd::SvmUnmapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmUnmapMemory");
+  }
+  virtual void submitSignal(amd::SignalCommand& cmd) { submitUnsupported(cmd, "Signal"); }
   virtual void submitMakeBuffersResident(amd::MakeBuffersResidentCommand& cmd) {
-    Unsupported("MakeBuffersResident");
+    submitUnsupported(cmd, "MakeBuffersResident");
   }
 
  private:
