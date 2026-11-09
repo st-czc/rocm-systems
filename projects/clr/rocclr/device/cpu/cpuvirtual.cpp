@@ -37,7 +37,6 @@ void VirtualDevice::submit(amd::Command& cmd, std::function<void()> work) {
 
 void VirtualDevice::submit(amd::Command& cmd, uint32_t numTickets,
                            std::function<void(int)> task) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   Packet* packet = pool_.newPacket(&cmd, numTickets, cmd.eventWaitList());
@@ -54,7 +53,6 @@ void VirtualDevice::submitUnsupported(amd::Command& cmd, const char* command) {
 }
 
 void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   size_t offset = 0;
@@ -179,7 +177,6 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   size_t offset = 0;
@@ -319,7 +316,6 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   cl_command_type type = cmd.type();
@@ -452,7 +448,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   const auto& copyOps = cmd.copyOps();
@@ -494,7 +489,6 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
 }
 
 void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   const std::vector<amd::BatchWriteMemoryOp>& writeOps = cmd.WriteOps();
@@ -538,7 +532,6 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
 }
 
 void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   const std::vector<amd::BatchReadMemoryOp>& readOps = cmd.ReadOps();
@@ -573,7 +566,6 @@ void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
-  // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   if (cmd.type() != CL_COMMAND_SVM_MEMFILL && cmd.type() != CL_COMMAND_FILL_BUFFER) {

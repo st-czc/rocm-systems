@@ -27,8 +27,8 @@ namespace amd::cpu {
 class Pool;
 class Queue;
 
-//! hsa_signal_t: armed (1) drops to done (0) once. Subscribers registered after
-//! the drop run immediately, so a park-then-subscribe never loses a wakeup.
+//! One-shot: armed (1) drops to done (0) once. A subscriber added after the
+//! drop runs immediately, so park-then-subscribe never loses a wakeup.
 class Signal : public amd::ReferenceCountedObject {
  public:
   using Callback = std::function<void()>;
@@ -54,9 +54,8 @@ using SignalWaitList = std::vector<Signal*>;
 
 using Ticket = std::optional<uint32_t>;
 
-//! One unit of work, divisible into num_tickets parts. Single-owner: submit
-//! hands it to the runtime, which deletes it on completion. Read its fields
-//! before submitting, never after.
+//! Single-owner unit of work split into num_tickets tickets. submit() hands it
+//! to the runtime, which deletes it on completion; read fields before submit().
 struct Packet {
   Queue* queue{};
 
@@ -75,8 +74,7 @@ struct Packet {
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
 
-  //! Claims the next ticket, in descending order. nullopt when every ticket has
-  //! been handed out.
+  //! Claims the next ticket in descending order; nullopt when none remain.
   Ticket getTicket() {
     uint32_t ticket = num_tickets.load(std::memory_order_relaxed);
     do {
@@ -89,8 +87,7 @@ struct Packet {
   }
 };
 
-//! In-order queue, the counterpart of an hsa_queue_t. Exactly one packet runs at
-//! a time, in submission order.
+//! In-order queue: exactly one packet runs at a time.
 class Queue {
  public:
   explicit Queue(Pool& pool);
@@ -98,9 +95,8 @@ class Queue {
   void submit(Packet* packet);
   Packet* nextTaskPacket(bool busy_done);
 
-  //! Nothing running, queued or parked. A parked head's onDone callbacks capture
-  //! this, so destroying a queue that is not drained leaves them pointing at
-  //! freed memory.
+  //! Nothing running, queued, or parked. An undrained queue must not be
+  //! destroyed: a parked head's callbacks capture this.
   bool isDrained();
 
  private:
@@ -114,9 +110,8 @@ class Queue {
   size_t num_waiting_ = 0;
 };
 
-//! ROCr's async-events thread: one thread, handlers run serially on it.
-//! Completion bookkeeping goes here so it never occupies a worker -- the pool is
-//! for compute only.
+//! Serial completion thread; bookkeeping and callbacks run here so workers only
+//! run packet->task.
 class AsyncHandler {
  public:
   using Handler = std::function<void()>;
@@ -126,7 +121,6 @@ class AsyncHandler {
   AsyncHandler(const AsyncHandler&) = delete;
   AsyncHandler& operator=(const AsyncHandler&) = delete;
 
-  //! Runs |handler| on the async thread. Never blocks.
   void post(Handler handler);
 
  private:
@@ -136,12 +130,11 @@ class AsyncHandler {
   std::condition_variable cv_;
   std::deque<Handler> handlers_;
   bool exit_ = false;
-  //! Last, so everything above is initialized before the thread starts.
+  //! Last, so the members above are initialized before the thread starts.
   std::thread thread_;
 };
 
-//! Worker pool plus the queues and signals it owns. One per device. Its lifetime
-//! is the program's.
+//! One per device; lives for the program.
 class Pool {
  public:
   explicit Pool(uint32_t workers);
@@ -151,28 +144,24 @@ class Pool {
 
   void submit(Packet* packet);
 
-  //! Number of workers that can claim tickets from a packet.
   uint32_t numWorkers() const { return static_cast<uint32_t>(workers_.size()); }
 
-  //! |owner| is the stream that owns the queue, opaque here. Pass it back to
-  //! deleteQueue.
+  //! owner is an opaque stream key; pass it back to deleteQueue.
   Queue* newQueue(const void* owner);
-  //! Destroys |owner|'s queue, or defers it until the queue drains.
+  //! Destroys |owner|'s queue, or defers it until drained.
   void deleteQueue(const void* owner);
 
-  //! Looks up every event in the wait list. An event still in flight contributes
-  //! a dependency edge; one already gone contributes nothing. Must be followed
-  //! by submit(): the table entry it creates is removed only by completion.
+  //! An in-flight event adds a dependency edge; a completed one adds nothing.
+  //! Must be followed by submit(): only completion removes the table entry.
   Packet* newPacket(Event* event, uint32_t num_tickets, const EventWaitList& event_wait_list);
   void donePacket(Packet* packet);
 
-  //! Runs |handler| on the async thread, off the worker pool.
   void postAsync(AsyncHandler::Handler handler) { async_.post(std::move(handler)); }
 
  private:
   static void loop(Pool* pool);
 
-  //! Destroys whatever in dying_queues_ has drained. Caller holds queue_lock_.
+  //! Destroys drained entries in dying_queues_; caller holds queue_lock_.
   void sweepDyingQueues();
 
   std::mutex queue_lock_;
