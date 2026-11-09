@@ -96,12 +96,12 @@ VirtualDevice::~VirtualDevice() {
   pool_.deleteQueue(this);
 }
 
-void VirtualDevice::submit(amd::Command& cmd, std::function<bool()> work) {
+void VirtualDevice::submit(amd::Command& cmd, std::function<void()> work) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
   Packet* packet = pool_.newPacket(&cmd, 1, cmd.eventWaitList());
-  packet->task = [packet, work = std::move(work)](int) { work(); };
+  packet->task = [work = std::move(work)](int) { work(); };
   queue_->submit(packet);
 }
 
@@ -142,73 +142,102 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
     imageBuffer = true;
   }
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    bool result = false;
-
-    switch (type) {
-      case CL_COMMAND_READ_BUFFER: {
-        if (devMem == nullptr) {
-          break;
-        }
-
-        amd::Coord3D origin(cmd.origin()[0]);
-        if (imageBuffer) {
-          size_t elemSize = cmd.source().asImage()->getImageFormat().getElementSize();
-          origin.c[0] *= elemSize;
-          size.c[0] *= elemSize;
-        }
-        if (hostMemory != nullptr) {
-          // Accelerated transfer without pinning
-          amd::Coord3D dstOrigin(offset);
-          result = blitMgr().copyBuffer(*devMem, *hostMemory, origin, dstOrigin, size,
-                                        cmd.isEntireMemory(), cmd.copyMetadata());
-        } else {
-          result = blitMgr().readBuffer(*devMem, dst, origin, size, cmd.isEntireMemory(),
-                                        cmd.copyMetadata());
-        }
-        break;
+  switch (type) {
+    case CL_COMMAND_READ_BUFFER: {
+      if (devMem == nullptr) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
       }
-      case CL_COMMAND_READ_BUFFER_RECT: {
-        if (devMem == nullptr) {
-          break;
-        }
 
+      amd::Coord3D origin(cmd.origin()[0]);
+      if (imageBuffer) {
+        size_t elemSize = cmd.source().asImage()->getImageFormat().getElementSize();
+        origin.c[0] *= elemSize;
+        size.c[0] *= elemSize;
+      }
+      const address src = static_cast<address>(devMem->cpuMap(*this)) + origin[0];
+      if (hostMemory != nullptr) {
+        // Accelerated transfer without pinning
+        const address dstMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
+        submit(cmd, [=]() { std::memcpy(dstMem, src, size[0]); });
+      } else {
+        submit(cmd, [=]() { std::memcpy(dst, src, size[0]); });
+      }
+      break;
+    }
+    case CL_COMMAND_READ_BUFFER_RECT: {
+      if (devMem == nullptr) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
+      }
+
+      const address src = static_cast<address>(devMem->cpuMap(*this));
+      if (hostMemory != nullptr) {
         amd::BufferRect hostbufferRect;
         amd::Coord3D region(0);
         amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
         hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
                               cmd.hostRect().slicePitch_);
-        if (hostMemory != nullptr) {
-          result = blitMgr().copyBufferRect(*devMem, *hostMemory, cmd.bufRect(), hostbufferRect,
-                                            size, cmd.isEntireMemory(), cmd.copyMetadata());
-        } else {
-          result = blitMgr().readBufferRect(*devMem, dst, cmd.bufRect(), cmd.hostRect(), size,
-                                            cmd.isEntireMemory(), cmd.copyMetadata());
-        }
-        break;
+        const address dstMem = static_cast<address>(hostMemory->cpuMap(*this));
+        const amd::BufferRect srcRect(cmd.bufRect());
+        const amd::BufferRect dstRect(hostbufferRect);
+        submit(cmd, [=]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(dstMem + dstRect.offset(0, y, z), src + srcRect.offset(0, y, z), size[0]);
+            }
+          }
+        });
+      } else {
+        const amd::BufferRect srcRect(cmd.bufRect());
+        const amd::BufferRect dstRect(cmd.hostRect());
+        submit(cmd, [=]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(static_cast<address>(dst) + dstRect.offset(0, y, z),
+                          src + srcRect.offset(0, y, z), size[0]);
+            }
+          }
+        });
       }
-      case CL_COMMAND_READ_IMAGE: {
-        if (devMem == nullptr) {
-          break;
-        }
-
-        result = blitMgr().readImage(*devMem, dst, cmd.origin(), size, cmd.rowPitch(),
-                                     cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
-        break;
+      break;
+    }
+    case CL_COMMAND_READ_IMAGE: {
+      if (devMem == nullptr) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
       }
-      default:
-        break;
-    }
 
-    if (!result) {
-      LogError("submitReadMemory failed!");
-    } else {
-      LogPrintfInfo("CPU VirtualDevice::submitReadMemory: %llu ns",
-                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+      const amd::Image* image = cmd.source().asImage();
+      const size_t elementSize = image->getImageFormat().getElementSize();
+      size_t rowPitch = cmd.rowPitch();
+      size_t slicePitch = cmd.slicePitch();
+      if (rowPitch == 0) {
+        rowPitch = size[0] * elementSize;
+      }
+      if (slicePitch == 0) {
+        slicePitch = size[0] * size[1] * elementSize;
+      }
+      const size_t imageRowPitch = image->getRowPitch();
+      const size_t imageSlicePitch = image->getSlicePitch();
+      const size_t firstRow = cmd.origin()[0] * elementSize + imageRowPitch * cmd.origin()[1] +
+                              imageSlicePitch * cmd.origin()[2];
+      const address src = static_cast<address>(devMem->cpuMap(*this));
+      submit(cmd, [=]() {
+        for (size_t z = 0; z < size[2]; ++z) {
+          for (size_t y = 0; y < size[1]; ++y) {
+            std::memcpy(static_cast<address>(dst) + rowPitch * y + slicePitch * z,
+                        src + firstRow + imageRowPitch * y + imageSlicePitch * z,
+                        size[0] * elementSize);
+          }
+        }
+      });
+      break;
     }
-    return result;
-  });
+    default:
+      submitUnsupported(cmd, "ReadMemory");
+      break;
+  }
   // profilingEnd();
 }
 
@@ -244,81 +273,120 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
     imageBuffer = true;
   }
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    bool result = false;
-
-    switch (type) {
-      case CL_COMMAND_WRITE_BUFFER: {
-        amd::Coord3D origin(cmd.origin()[0]);
-        if (imageBuffer) {
-          size_t elemSize = cmd.destination().asImage()->getImageFormat().getElementSize();
-          origin.c[0] *= elemSize;
-          size.c[0] *= elemSize;
-        }
-        if (devMem == nullptr || devMem->virtualAddress() == 0) {
-          break;
-        }
-
-        if (hostMemory != nullptr) {
-          // Accelerated transfer without pinning
-          amd::Coord3D srcOrigin(offset);
-          result = blitMgr().copyBuffer(*hostMemory, *devMem, srcOrigin, origin, size,
-                                        cmd.isEntireMemory(), cmd.copyMetadata());
-        } else {
-          result = blitMgr().writeBuffer(src, *devMem, origin, size, cmd.isEntireMemory(),
-                                         cmd.copyMetadata());
-        }
-        break;
+  switch (type) {
+    case CL_COMMAND_WRITE_BUFFER: {
+      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
       }
-      case CL_COMMAND_WRITE_BUFFER_RECT: {
-        amd::BufferRect hostbufferRect;
+
+      amd::Coord3D origin(cmd.origin()[0]);
+      if (imageBuffer) {
+        size_t elemSize = cmd.destination().asImage()->getImageFormat().getElementSize();
+        origin.c[0] *= elemSize;
+        size.c[0] *= elemSize;
+      }
+      address dst = static_cast<address>(devMem->cpuMap(*this)) + origin[0];
+      if (hostMemory != nullptr) {
+        // Accelerated transfer without pinning
+        const address srcMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
+        submit(cmd, [=, &cmd]() {
+          std::memcpy(dst, srcMem, size[0]);
+          cmd.destination().signalWrite(&dev_);
+        });
+      } else {
+        submit(cmd, [=, &cmd]() {
+          std::memcpy(dst, src, size[0]);
+          cmd.destination().signalWrite(&dev_);
+        });
+      }
+      break;
+    }
+    case CL_COMMAND_WRITE_BUFFER_RECT: {
+      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
+      }
+
+      const address dst = static_cast<address>(devMem->cpuMap(*this));
+      amd::BufferRect hostbufferRect;
+      if (hostMemory != nullptr) {
         amd::Coord3D region(0);
         amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
         hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
                               cmd.hostRect().slicePitch_);
-        if (devMem == nullptr || devMem->virtualAddress() == 0) {
-          break;
-        }
-
-        if (hostMemory != nullptr) {
-          result = blitMgr().copyBufferRect(*hostMemory, *devMem, hostbufferRect, cmd.bufRect(),
-                                            size, cmd.isEntireMemory(), cmd.copyMetadata());
-        } else {
-          result = blitMgr().writeBufferRect(src, *devMem, cmd.hostRect(), cmd.bufRect(), size,
-                                             cmd.isEntireMemory(), cmd.copyMetadata());
-        }
-        break;
+        const address srcMem = static_cast<address>(hostMemory->cpuMap(*this));
+        const amd::BufferRect srcRect(hostbufferRect);
+        const amd::BufferRect dstRect(cmd.bufRect());
+        submit(cmd, [=, &cmd]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(dst + dstRect.offset(0, y, z), srcMem + srcRect.offset(0, y, z), size[0]);
+            }
+          }
+          cmd.destination().signalWrite(&dev_);
+        });
+      } else {
+        const amd::BufferRect srcRect(cmd.hostRect());
+        const amd::BufferRect dstRect(cmd.bufRect());
+        submit(cmd, [=, &cmd]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(dst + dstRect.offset(0, y, z),
+                          reinterpret_cast<address>(const_cast<char*>(src)) + srcRect.offset(0, y, z),
+                          size[0]);
+            }
+          }
+          cmd.destination().signalWrite(&dev_);
+        });
       }
-      case CL_COMMAND_WRITE_IMAGE: {
-        if (devMem == nullptr || devMem->virtualAddress() == 0) {
-          break;
-        }
-
-        if (hostMemory != nullptr) {
-          amd::Coord3D srcOrigin(offset);
-          result = blitMgr().copyBufferToImage(*hostMemory, *devMem, srcOrigin, cmd.origin(), size,
-                                               cmd.isEntireMemory(), cmd.rowPitch(),
-                                               cmd.slicePitch(), cmd.copyMetadata());
-        } else {
-          result = blitMgr().writeImage(src, *devMem, cmd.origin(), size, cmd.rowPitch(),
-                                        cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
-        }
-        break;
+      break;
+    }
+    case CL_COMMAND_WRITE_IMAGE: {
+      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+        cmd.setStatus(CL_OUT_OF_RESOURCES);
+        return;
       }
-      default:
-        break;
-    }
 
-    if (!result) {
-      LogError("submitWriteMemory failed!");
-    } else {
-      cmd.destination().signalWrite(&dev_);
-      LogPrintfInfo("CPU VirtualDevice::submitWriteMemory: %llu ns",
-                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+      const amd::Image* image = cmd.destination().asImage();
+      const size_t elementSize = image->getImageFormat().getElementSize();
+      const size_t imageRowPitch = image->getRowPitch();
+      const size_t imageSlicePitch = image->getSlicePitch();
+      const size_t firstRow = cmd.origin()[0] * elementSize + imageRowPitch * cmd.origin()[1] +
+                              imageSlicePitch * cmd.origin()[2];
+      address dst = static_cast<address>(devMem->cpuMap(*this));
+      if (hostMemory != nullptr) {
+        const address srcMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
+        submit(cmd, [=, &cmd]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(dst + firstRow + imageRowPitch * y + imageSlicePitch * z,
+                          srcMem + size[0] * elementSize * (y + size[1] * z),
+                          size[0] * elementSize);
+            }
+          }
+          cmd.destination().signalWrite(&dev_);
+        });
+      } else {
+        const size_t rowPitch = size[0] * elementSize;
+        submit(cmd, [=, &cmd]() {
+          for (size_t z = 0; z < size[2]; ++z) {
+            for (size_t y = 0; y < size[1]; ++y) {
+              std::memcpy(dst + firstRow + imageRowPitch * y + imageSlicePitch * z,
+                          reinterpret_cast<address>(const_cast<char*>(src)) + rowPitch * y +
+                              rowPitch * size[1] * z,
+                          rowPitch);
+            }
+          }
+          cmd.destination().signalWrite(&dev_);
+        });
+      }
+      break;
     }
-    return result;
-  });
+    default:
+      submitUnsupported(cmd, "WriteMemory");
+      break;
+  }
   // profilingEnd();
 }
 
@@ -330,6 +398,7 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
 
   cl_command_type type = cmd.type();
   bool entire = cmd.isEntireMemory();
+  const amd::Coord3D size = cmd.size();
 
   Memory* srcDevMem = static_cast<Memory*>(cmd.source().getDeviceMemory(dev_, false));
   Memory* dstDevMem = static_cast<Memory*>(cmd.destination().getDeviceMemory(dev_, false));
@@ -345,66 +414,120 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   dstDevMem->syncCacheFromHost(*this, syncFlags);
   srcDevMem->syncCacheFromHost(*this);
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    bool result = false;
-
-    switch (type) {
-      case CL_COMMAND_SVM_MEMCPY:
-      case CL_COMMAND_COPY_BUFFER: {
-        result = blitMgr().copyBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                      cmd.size(), entire, cmd.copyMetadata());
-        break;
-      }
-      case CL_COMMAND_COPY_BUFFER_RECT: {
-        result = blitMgr().copyBufferRect(*srcDevMem, *dstDevMem, cmd.srcRect(), cmd.dstRect(),
-                                          cmd.size(), entire, cmd.copyMetadata());
-        break;
-      }
-      case CL_COMMAND_COPY_IMAGE: {
-        result = blitMgr().copyImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                     cmd.size(), entire, cmd.copyMetadata());
-        break;
-      }
-      case CL_COMMAND_COPY_IMAGE_TO_BUFFER: {
-        const size_t rowPitch = cmd.dstRect().rowPitch_;
-        const size_t elementSize = cmd.source().asImage()->getImageFormat().getElementSize();
-        if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
-          result = copyImageToBufferRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
-                                         cmd.dstRect().slicePitch_);
-        } else {
-          result = blitMgr().copyImageToBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
-                                               cmd.dstOrigin(), cmd.size(), entire, rowPitch,
-                                               cmd.dstRect().slicePitch_, cmd.copyMetadata());
-        }
-        break;
-      }
-      case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
-        const size_t rowPitch = cmd.srcRect().rowPitch_;
-        const size_t elementSize = cmd.destination().asImage()->getImageFormat().getElementSize();
-        if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
-          result = copyBufferToImageRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
-                                         cmd.srcRect().slicePitch_);
-        } else {
-          result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
-                                               cmd.dstOrigin(), cmd.size(), entire, rowPitch,
-                                               cmd.srcRect().slicePitch_, cmd.copyMetadata());
-        }
-        break;
-      }
-      default:
-        break;
+  switch (type) {
+    case CL_COMMAND_SVM_MEMCPY:
+    case CL_COMMAND_COPY_BUFFER: {
+      const address src = static_cast<address>(srcDevMem->cpuMap(*this)) + cmd.srcOrigin()[0];
+      address dst = static_cast<address>(dstDevMem->cpuMap(*this)) + cmd.dstOrigin()[0];
+      submit(cmd, [=, &cmd]() {
+        std::memcpy(dst, src, size[0]);
+        cmd.destination().signalWrite(&dev_);
+      });
+      break;
     }
-
-    if (!result) {
-      LogError("submitCopyMemory failed!");
-    } else {
-      cmd.destination().signalWrite(&dev_);
-      LogPrintfInfo("CPU VirtualDevice::submitCopyMemory: %llu ns",
-                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    case CL_COMMAND_COPY_BUFFER_RECT: {
+      const address src = static_cast<address>(srcDevMem->cpuMap(*this));
+      address dst = static_cast<address>(dstDevMem->cpuMap(*this));
+      const amd::BufferRect srcRect(cmd.srcRect());
+      const amd::BufferRect dstRect(cmd.dstRect());
+      submit(cmd, [=, &cmd]() {
+        for (size_t z = 0; z < size[2]; ++z) {
+          for (size_t y = 0; y < size[1]; ++y) {
+            std::memcpy(dst + dstRect.offset(0, y, z), src + srcRect.offset(0, y, z), size[0]);
+          }
+        }
+        cmd.destination().signalWrite(&dev_);
+      });
+      break;
     }
-    return result;
-  });
+    case CL_COMMAND_COPY_IMAGE: {
+      const address src = static_cast<address>(srcDevMem->cpuMap(*this));
+      address dst = static_cast<address>(dstDevMem->cpuMap(*this));
+      const size_t elementSize = cmd.source().asImage()->getImageFormat().getElementSize();
+      const size_t srcRowPitch = cmd.source().asImage()->getRowPitch();
+      const size_t srcSlicePitch = cmd.source().asImage()->getSlicePitch();
+      const size_t dstRowPitch = cmd.destination().asImage()->getRowPitch();
+      const size_t dstSlicePitch = cmd.destination().asImage()->getSlicePitch();
+      const size_t srcFirst = cmd.srcOrigin()[0] * elementSize + srcRowPitch * cmd.srcOrigin()[1] +
+                              srcSlicePitch * cmd.srcOrigin()[2];
+      const size_t dstFirst = cmd.dstOrigin()[0] * elementSize + dstRowPitch * cmd.dstOrigin()[1] +
+                              dstSlicePitch * cmd.dstOrigin()[2];
+      submit(cmd, [=, &cmd]() {
+        for (size_t z = 0; z < size[2]; ++z) {
+          for (size_t y = 0; y < size[1]; ++y) {
+            std::memcpy(dst + dstFirst + dstRowPitch * y + dstSlicePitch * z,
+                        src + srcFirst + srcRowPitch * y + srcSlicePitch * z,
+                        size[0] * elementSize);
+          }
+        }
+        cmd.destination().signalWrite(&dev_);
+      });
+      break;
+    }
+    case CL_COMMAND_COPY_IMAGE_TO_BUFFER: {
+      const address src = static_cast<address>(srcDevMem->cpuMap(*this));
+      const amd::Image* image = cmd.source().asImage();
+      const size_t elementSize = image->getImageFormat().getElementSize();
+      const size_t imageRowPitch = image->getRowPitch();
+      const size_t imageSlicePitch = image->getSlicePitch();
+      const size_t srcFirst = cmd.srcOrigin()[0] * elementSize +
+                              imageRowPitch * cmd.srcOrigin()[1] +
+                              imageSlicePitch * cmd.srcOrigin()[2];
+      size_t dstRowPitch = cmd.dstRect().rowPitch_;
+      if (dstRowPitch == 0) {
+        dstRowPitch = size[0] * elementSize;
+      }
+      size_t dstSlicePitch = cmd.dstRect().slicePitch_;
+      if (dstSlicePitch == 0) {
+        dstSlicePitch = dstRowPitch * size[1];
+      }
+      const address dst = static_cast<address>(dstDevMem->cpuMap(*this)) + cmd.dstOrigin()[0];
+      submit(cmd, [=, &cmd]() {
+        for (size_t z = 0; z < size[2]; ++z) {
+          for (size_t y = 0; y < size[1]; ++y) {
+            std::memcpy(dst + dstRowPitch * y + dstSlicePitch * z,
+                        src + srcFirst + imageRowPitch * y + imageSlicePitch * z,
+                        size[0] * elementSize);
+          }
+        }
+        cmd.destination().signalWrite(&dev_);
+      });
+      break;
+    }
+    case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
+      const address src = static_cast<address>(srcDevMem->cpuMap(*this));
+      const amd::Image* image = cmd.destination().asImage();
+      const size_t elementSize = image->getImageFormat().getElementSize();
+      const size_t imageRowPitch = image->getRowPitch();
+      const size_t imageSlicePitch = image->getSlicePitch();
+      const size_t dstFirst = cmd.dstOrigin()[0] * elementSize +
+                              imageRowPitch * cmd.dstOrigin()[1] +
+                              imageSlicePitch * cmd.dstOrigin()[2];
+      size_t srcRowPitch = cmd.srcRect().rowPitch_;
+      if (srcRowPitch == 0) {
+        srcRowPitch = size[0] * elementSize;
+      }
+      size_t srcSlicePitch = cmd.srcRect().slicePitch_;
+      if (srcSlicePitch == 0) {
+        srcSlicePitch = srcRowPitch * size[1];
+      }
+      address dst = static_cast<address>(dstDevMem->cpuMap(*this));
+      submit(cmd, [=, &cmd]() {
+        for (size_t z = 0; z < size[2]; ++z) {
+          for (size_t y = 0; y < size[1]; ++y) {
+            std::memcpy(dst + dstFirst + imageRowPitch * y + imageSlicePitch * z,
+                        src + srcRowPitch * y + srcSlicePitch * z,
+                        size[0] * elementSize);
+          }
+        }
+        cmd.destination().signalWrite(&dev_);
+      });
+      break;
+    }
+    default:
+      submitUnsupported(cmd, "CopyMemory");
+      break;
+  }
   // profilingEnd();
 }
 
@@ -417,6 +540,16 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
     cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
     return;
   }
+
+  struct CopySpan {
+    address src;
+    address dst;
+    size_t size;
+  };
+  std::vector<CopySpan> spans;
+  spans.reserve(copyOps.size());
+  std::vector<amd::Memory*> written;
+  written.reserve(copyOps.size());
 
   // Synchronize source and destination memory
   device::Memory::SyncFlags syncFlags;
@@ -431,21 +564,18 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
     }
     dstDevMem->syncCacheFromHost(*this, syncFlags);
     srcDevMem->syncCacheFromHost(*this);
+    spans.push_back({static_cast<address>(srcDevMem->cpuMap(*this)) + op.srcOffset,
+                     static_cast<address>(dstDevMem->cpuMap(*this)) + op.dstOffset, op.size});
+    written.push_back(op.dstMemory);
   }
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    if (!blitMgr().copyBufferBatch(copyOps)) {
-      LogError("submitBatchCopyMemory failed!");
-      return false;
+  submit(cmd, [spans = std::move(spans), written = std::move(written), this]() {
+    for (const auto& span : spans) {
+      std::memcpy(span.dst, span.src, span.size);
     }
-
-    for (const auto& op : copyOps) {
-      op.dstMemory->signalWrite(&dev_);
+    for (auto* memory : written) {
+      memory->signalWrite(&dev_);
     }
-    LogPrintfInfo("CPU VirtualDevice::submitBatchCopyMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    return true;
   });
 }
 
@@ -459,19 +589,34 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
     return;
   }
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    if (!blitMgr().WriteBufferBatch(writeOps)) {
-      LogError("SubmitBatchWriteMemory: Batch write failed!");
-      return false;
+  struct WriteSpan {
+    const void* src;
+    address dst;
+    size_t size;
+  };
+  std::vector<WriteSpan> spans;
+  spans.reserve(writeOps.size());
+  std::vector<amd::Memory*> written;
+  written.reserve(writeOps.size());
+  for (const auto& op : writeOps) {
+    Memory* dstDevMem = static_cast<Memory*>(op.dst_memory->getDeviceMemory(dev_, false));
+    if (dstDevMem == nullptr) {
+      LogError("SubmitBatchWriteMemory: Invalid memory objects!");
+      cmd.setStatus(CL_INVALID_MEM_OBJECT);
+      return;
     }
+    spans.push_back({op.src_host,
+                     static_cast<address>(dstDevMem->cpuMap(*this)) + op.dst_offset, op.size});
+    written.push_back(op.dst_memory);
+  }
 
-    for (const auto& op : writeOps) {
-      op.dst_memory->signalWrite(&dev_);
+  submit(cmd, [spans = std::move(spans), written = std::move(written), this]() {
+    for (const auto& span : spans) {
+      std::memcpy(span.dst, span.src, span.size);
     }
-    LogPrintfInfo("CPU VirtualDevice::SubmitBatchWriteMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    return true;
+    for (auto* memory : written) {
+      memory->signalWrite(&dev_);
+    }
   });
 }
 
@@ -485,61 +630,29 @@ void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
     return;
   }
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    if (!blitMgr().ReadBufferBatch(readOps)) {
-      LogError("SubmitBatchReadMemory: Batch read failed!");
-      return false;
+  struct ReadSpan {
+    address src;
+    void* dst;
+    size_t size;
+  };
+  std::vector<ReadSpan> spans;
+  spans.reserve(readOps.size());
+  for (const auto& op : readOps) {
+    Memory* srcDevMem = static_cast<Memory*>(op.src_memory->getDeviceMemory(dev_, false));
+    if (srcDevMem == nullptr) {
+      LogError("SubmitBatchReadMemory: Invalid memory objects!");
+      cmd.setStatus(CL_INVALID_MEM_OBJECT);
+      return;
     }
+    spans.push_back({static_cast<address>(srcDevMem->cpuMap(*this)) + op.src_offset, op.dst_host,
+                     op.size});
+  }
 
-    LogPrintfInfo("CPU VirtualDevice::SubmitBatchReadMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    return true;
+  submit(cmd, [spans = std::move(spans)]() {
+    for (const auto& span : spans) {
+      std::memcpy(span.dst, span.src, span.size);
+    }
   });
-}
-
-//! HostBlitManager advances the buffer by the copied row width, not by the
-//! buffer row pitch. Split the copy per row when the buffer is pitched.
-bool VirtualDevice::copyBufferToImageRows(device::Memory& srcMemory, device::Memory& dstMemory,
-                                          const amd::CopyMemoryCommand& cmd, size_t rowPitch,
-                                          size_t slicePitch) {
-  const amd::Coord3D& srcOrigin = cmd.srcOrigin();
-  const amd::Coord3D& dstOrigin = cmd.dstOrigin();
-  const amd::Coord3D& size = cmd.size();
-
-  for (size_t slice = 0; slice < size[2]; ++slice) {
-    for (size_t row = 0; row < size[1]; ++row) {
-      const amd::Coord3D src(srcOrigin[0] + row * rowPitch + slice * slicePitch);
-      const amd::Coord3D dst(dstOrigin[0], dstOrigin[1] + row, dstOrigin[2] + slice);
-      const amd::Coord3D oneRow(size[0], 1, 1);
-      if (!blitMgr().copyBufferToImage(srcMemory, dstMemory, src, dst, oneRow, false, 0, 0,
-                                       cmd.copyMetadata())) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-bool VirtualDevice::copyImageToBufferRows(device::Memory& srcMemory, device::Memory& dstMemory,
-                                          const amd::CopyMemoryCommand& cmd, size_t rowPitch,
-                                          size_t slicePitch) {
-  const amd::Coord3D& srcOrigin = cmd.srcOrigin();
-  const amd::Coord3D& dstOrigin = cmd.dstOrigin();
-  const amd::Coord3D& size = cmd.size();
-
-  for (size_t slice = 0; slice < size[2]; ++slice) {
-    for (size_t row = 0; row < size[1]; ++row) {
-      const amd::Coord3D src(srcOrigin[0], srcOrigin[1] + row, srcOrigin[2] + slice);
-      const amd::Coord3D dst(dstOrigin[0] + row * rowPitch + slice * slicePitch);
-      const amd::Coord3D oneRow(size[0], 1, 1);
-      if (!blitMgr().copyImageToBuffer(srcMemory, dstMemory, src, dst, oneRow, false, 0, 0,
-                                       cmd.copyMetadata())) {
-        return false;
-      }
-    }
-  }
-  return true;
 }
 
 bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
@@ -558,8 +671,7 @@ bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, con
     case CL_COMMAND_FILL_BUFFER: {
       result = blitMgr().fillBuffer(*memory, pattern, patternSize, surface, origin, size, entire);
       break;
-    }
-    case CL_COMMAND_FILL_IMAGE: {
+    }    case CL_COMMAND_FILL_IMAGE: {
       // result = blitMgr().fillImage(*memory, pattern, origin, size, entire);
       Unsupported("FillImage");
       break;
@@ -584,15 +696,9 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
 
   // profilingBegin(cmd, true);
 
-  submit(cmd, [=, &cmd]() mutable {
-    const uint64_t startTime = amd::Os::timeNanos();
-    if (!fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
-                    cmd.origin(), cmd.size())) {
-      return false;
-    }
-    LogPrintfInfo("CPU VirtualDevice::submitFillMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    return true;
+  submit(cmd, [this, &cmd]() {
+    fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
+               cmd.origin(), cmd.size());
   });
   // profilingEnd();
 }

@@ -80,14 +80,6 @@ class VirtualDevice : public device::VirtualDevice {
   }
 
  private:
-  //! Copies a pitched buffer to an image one row at a time
-  bool copyBufferToImageRows(device::Memory& srcMemory, device::Memory& dstMemory,
-                             const amd::CopyMemoryCommand& cmd, size_t rowPitch, size_t slicePitch);
-
-  //! Copies an image to a pitched buffer one row at a time
-  bool copyImageToBufferRows(device::Memory& srcMemory, device::Memory& dstMemory,
-                             const amd::CopyMemoryCommand& cmd, size_t rowPitch, size_t slicePitch);
-
   //! Fills a memory object with a pattern
   bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
                   size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,
@@ -96,8 +88,9 @@ class VirtualDevice : public device::VirtualDevice {
   //! The host backend implements no command.
   void Unsupported(const char* command);
 
-  //! Submits one command as a single-ticket packet. work runs on a pool worker.
-  void submit(amd::Command& cmd, std::function<bool()> work);
+  //! Submits one command as a single-ticket packet. work runs on a pool worker
+  //! and does no bookkeeping: the decision it runs was made before submission.
+  void submit(amd::Command& cmd, std::function<void()> work);
 
   //! Fails a command the backend does not implement, without submitting it.
   void submitUnsupported(amd::Command& cmd, const char* command);
