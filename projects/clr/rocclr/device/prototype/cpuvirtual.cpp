@@ -29,9 +29,9 @@ void simulateWork(void* p, int i) {
 }  // namespace
 
 VirtualCPU::VirtualCPU(amd::Device& device, Pool& pool)
-    : VirtualDevice(device), pool_(pool), queue_(pool.newQueue()), queue_id_(g_queue_id++) {}
+    : VirtualDevice(device), pool_(pool), queue_(pool.newQueue(this)), queue_id_(g_queue_id++) {}
 
-VirtualCPU::~VirtualCPU() {}
+VirtualCPU::~VirtualCPU() { pool_.deleteQueue(this); }
 
 //! The counterpart of VirtualGPU::updateCommandsState. Only the batch head is
 //! given this function; running it advances every command of the batch to

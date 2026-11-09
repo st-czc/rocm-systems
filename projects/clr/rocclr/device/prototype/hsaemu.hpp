@@ -127,6 +127,11 @@ class Queue {
   void submit(Packet* packet);
   Packet* nextTaskPacket(bool busy_done);
 
+  //! Nothing running, queued or parked. A parked head's onDone callbacks
+  //! capture this, so destroying a queue that is not drained leaves them
+  //! pointing at freed memory.
+  bool isDrained();
+
  private:
   Packet* nextPacket(bool busy_done);
 
@@ -178,7 +183,11 @@ class Pool {
 
   void submit(Packet* packet);
 
-  Queue* newQueue();
+  //! |owner| is the stream that owns the queue, opaque here. Pass it back to
+  //! deleteQueue.
+  Queue* newQueue(const void* owner);
+  //! Destroys |owner|'s queue, or defers it until the queue drains.
+  void deleteQueue(const void* owner);
 
   Packet* newPacket(Event* event, uint32_t num_tickets, const EventWaitList& event_wait_list);
   void donePacket(Packet* packet);
@@ -189,8 +198,13 @@ class Pool {
  private:
   static void loop(Pool* pool);
 
+  //! Destroys whatever in dying_queues_ has drained. Caller holds queue_lock_.
+  void sweepDyingQueues();
+
   std::mutex queue_lock_;
-  std::vector<std::unique_ptr<Queue>> queues_;
+  std::unordered_map<const void*, std::unique_ptr<Queue>> stream_queues_;
+  //! Queues whose stream is gone but which had not drained yet.
+  std::vector<std::unique_ptr<Queue>> dying_queues_;
 
   std::mutex event_lock_;
   std::unordered_map<const Event*, Signal*> event_signals_;

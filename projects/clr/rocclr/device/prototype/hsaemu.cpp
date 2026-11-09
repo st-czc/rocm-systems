@@ -239,10 +239,49 @@ void Pool::loop(Pool* pool) {
 
 Queue::Queue(Pool& pool) : pool_(pool) {}
 
-Queue* Pool::newQueue() {
+bool Queue::isDrained() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return !busy_ && packets_.empty() && (num_waiting_ == 0);
+}
+
+void Pool::sweepDyingQueues() {
+  for (size_t idx = 0; idx < dying_queues_.size();) {
+    if (dying_queues_[idx]->isDrained()) {
+      dying_queues_[idx] = std::move(dying_queues_.back());
+      dying_queues_.pop_back();
+    } else {
+      idx++;
+    }
+  }
+}
+
+Queue* Pool::newQueue(const void* owner) {
   std::lock_guard<std::mutex> lock(queue_lock_);
-  queues_.emplace_back(new Queue(*this));
-  return queues_.back().get();
+  sweepDyingQueues();
+  auto& queue = stream_queues_[owner];
+  queue.reset(new Queue(*this));
+  return queue.get();
+}
+
+void Pool::deleteQueue(const void* owner) {
+  std::unique_ptr<Queue> queue;
+  {
+    std::lock_guard<std::mutex> lock(queue_lock_);
+    auto it = stream_queues_.find(owner);
+    if (it == stream_queues_.end()) {
+      return;
+    }
+    queue = std::move(it->second);
+    stream_queues_.erase(it);
+    if (!queue->isDrained()) {
+      // rocclr's HostQueue::terminate() normally drains via awaitCompletion()
+      // before releasing the vdev, but skips it when forceDestroy_ or
+      // IsGPUInError(). Keep the queue alive for its pending callbacks.
+      dying_queues_.push_back(std::move(queue));
+    }
+    sweepDyingQueues();
+  }
+  // queue is null unless it drained; destroy it outside the lock.
 }
 
 Packet::Packet(Event* event, uint32_t num_tickets)
