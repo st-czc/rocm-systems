@@ -7,7 +7,6 @@ target_sources(rocclr PRIVATE
   ${ROCCLR_SRC_DIR}/device/cpu/cpukernel.cpp
   ${ROCCLR_SRC_DIR}/device/cpu/cpumemory.cpp
   ${ROCCLR_SRC_DIR}/device/cpu/cpuprogram.cpp
-  ${ROCCLR_SRC_DIR}/device/cpu/cputhreadpool.cpp
   ${ROCCLR_SRC_DIR}/device/cpu/cpuvirtual.cpp
   ${ROCCLR_SRC_DIR}/device/cpu/threadpool.cpp)
 

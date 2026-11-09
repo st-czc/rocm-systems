@@ -158,11 +158,6 @@ bool Device::create(const amd::Isa& isa) {
     return false;
   }
 
-  if (!threadPool_.start(std::thread::hardware_concurrency())) {
-    LogError("Unable to start the CPU thread pool!");
-    return false;
-  }
-
   pool_.reset(new Pool(numWorkers));
 
   online_ = true;

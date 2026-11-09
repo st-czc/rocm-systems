@@ -13,7 +13,6 @@
 
 #include "cpukernel.hpp"
 #include "cpumemory.hpp"
-#include "cputhreadpool.hpp"
 #include "cpuvirtual.hpp"
 #include "threadpool.hpp"
 
@@ -225,9 +224,6 @@ class Device : public NullDevice {
     return static_cast<Memory*>(mem->getDeviceMemory(*this));
   }
 
-  //! Returns the launch thread pool shared by all virtual devices
-  ThreadPool& threadPool() const { return threadPool_; }
-
   //! Returns the scheduling pool that owns every queue, worker and signal
   Pool& pool() const { return *pool_; }
 
@@ -304,9 +300,6 @@ class Device : public NullDevice {
 
   //! Creates image backing with its buffer resource descriptor.
   Image* createImageMemory(amd::Memory& owner) const;
-
-  //! The launch thread pool owned by this device
-  mutable ThreadPool threadPool_;
 
   //! Scheduler shared by every command queue of this device
   std::unique_ptr<Pool> pool_;
