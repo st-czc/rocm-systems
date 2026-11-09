@@ -115,6 +115,52 @@ Packet* Queue::nextPacket(bool busy_done) {
   return nullptr;
 }
 
+namespace {
+thread_local bool tls_in_async_handler = false;
+}  // namespace
+
+AsyncHandler::AsyncHandler() : thread_(&AsyncHandler::loop, this) {}
+
+AsyncHandler::~AsyncHandler() {
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    exit_ = true;
+  }
+  cv_.notify_one();
+  if (thread_.joinable()) {
+    thread_.join();
+  }
+}
+
+void AsyncHandler::post(Handler handler) {
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    handlers_.push_back(std::move(handler));
+  }
+  cv_.notify_one();
+}
+
+bool AsyncHandler::inHandler() { return tls_in_async_handler; }
+
+void AsyncHandler::loop() {
+  tls_in_async_handler = true;
+  for (;;) {
+    Handler handler;
+    {
+      std::unique_lock<std::mutex> lock(lock_);
+      cv_.wait(lock, [this] { return exit_ || !handlers_.empty(); });
+      // Drain before exiting: a pending handler owns references that its
+      // posting packet has already dropped.
+      if (handlers_.empty()) {
+        return;
+      }
+      handler = std::move(handlers_.front());
+      handlers_.pop_front();
+    }
+    handler();
+  }
+}
+
 Pool::Pool(uint32_t workers) {
   for (uint32_t i = 0; i < workers; ++i) {
     workers_.emplace_back(&Pool::loop, this);

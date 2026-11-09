@@ -138,6 +138,36 @@ class Queue {
   size_t num_waiting_ = 0;
 };
 
+//! ROCr's async-events thread (Runtime::AsyncEventsLoop): one thread, handlers
+//! run serially on it. Completion bookkeeping goes here so it never occupies a
+//! worker -- the pool is for compute only.
+class AsyncHandler {
+ public:
+  using Handler = std::function<void()>;
+
+  AsyncHandler();
+  ~AsyncHandler();
+  AsyncHandler(const AsyncHandler&) = delete;
+  AsyncHandler& operator=(const AsyncHandler&) = delete;
+
+  //! Runs |handler| on the async thread. Never blocks.
+  void post(Handler handler);
+
+  //! ROCr's InAsyncSignalHandler(): true on the async thread. A handler that
+  //! would destroy what it is running under defers instead.
+  static bool inHandler();
+
+ private:
+  void loop();
+
+  std::mutex lock_;
+  std::condition_variable cv_;
+  std::deque<Handler> handlers_;
+  bool exit_ = false;
+  //! Last, so everything above is initialized before the thread starts.
+  std::thread thread_;
+};
+
 //! Worker pool plus the queues and signals it owns.
 class Pool {
  public:
@@ -153,6 +183,9 @@ class Pool {
   Packet* newPacket(Event* event, uint32_t num_tickets, const EventWaitList& event_wait_list);
   void donePacket(Packet* packet);
 
+  //! Runs |handler| on the async thread, off the worker pool.
+  void postAsync(AsyncHandler::Handler handler) { async_.post(std::move(handler)); }
+
  private:
   static void loop(Pool* pool);
 
@@ -165,6 +198,8 @@ class Pool {
   std::mutex packet_lock_;
   std::condition_variable cv_;
   std::deque<Packet*> ready_packets_;
+
+  AsyncHandler async_;
 
   bool shutdown_ = false;
   std::vector<std::thread> workers_;

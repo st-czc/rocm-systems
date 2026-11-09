@@ -79,8 +79,13 @@ void VirtualCPU::submitMarker(amd::Marker& cmd) {
       updateBatchState(head);
     }
   } else {
+    // Mirrors device/rocm: the non-CpuWait marker registers an async handler
+    // (rocvirtual.cpp:805-871) and the batch update runs on ROCr's async-events
+    // thread, never on a thread that executes work. onDone itself may fire on a
+    // worker, on the app thread, or on the async thread, so it only posts.
     if (auto* head = cmd.GetBatchHead()) {
-      signal->onDone([head] { updateBatchState(head); });
+      Pool* pool = &pool_;
+      signal->onDone([pool, head] { pool->postAsync([head] { updateBatchState(head); }); });
     }
     queue_->submit(packet);
   }
