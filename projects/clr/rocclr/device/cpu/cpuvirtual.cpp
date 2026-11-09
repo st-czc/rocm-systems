@@ -603,6 +603,9 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
   spans.reserve(writeOps.size());
   std::vector<amd::Memory*> written;
   written.reserve(writeOps.size());
+  // Sources marked kSrcAccessOrderDuringApiCall must be read before this call
+  // returns, so they are snapshotted now and the task writes the snapshot.
+  std::vector<std::vector<char>> snapshots;
   for (const auto& op : writeOps) {
     Memory* dstDevMem = static_cast<Memory*>(op.dst_memory->getDeviceMemory(dev_, false));
     if (dstDevMem == nullptr) {
@@ -610,12 +613,18 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
       cmd.setStatus(CL_INVALID_MEM_OBJECT);
       return;
     }
-    spans.push_back({op.src_host,
-                     static_cast<address>(dstDevMem->cpuMap(*this)) + op.dst_offset, op.size});
+    const void* src = op.src_host;
+    if (op.metadata.srcAccessOrder_ == amd::CopyMetadata::kSrcAccessOrderDuringApiCall) {
+      snapshots.emplace_back(static_cast<const char*>(op.src_host),
+                             static_cast<const char*>(op.src_host) + op.size);
+      src = snapshots.back().data();
+    }
+    spans.push_back({src, static_cast<address>(dstDevMem->cpuMap(*this)) + op.dst_offset, op.size});
     written.push_back(op.dst_memory);
   }
 
-  submit(cmd, [spans = std::move(spans), written = std::move(written), this]() {
+  submit(cmd, [spans = std::move(spans), written = std::move(written),
+               snapshots = std::move(snapshots), this]() {
     for (const auto& span : spans) {
       std::memcpy(span.dst, span.src, span.size);
     }
@@ -709,37 +718,34 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
 }
 
 void VirtualDevice::submitMarker(amd::Marker& cmd) {
-  const bool cpuWait = cmd.CpuWaitRequested();
-  amd::Command* head = nullptr;
-  Signal* signal = nullptr;
-  {
-    std::scoped_lock lock(execution());
+  // The lock stays held across the wait. The queue's batch handle still refers to
+  // the list this marker retires until submit() returns to enqueue(), which is
+  // where ResetSubmissionBatch() runs; holding the lock keeps another thread's
+  // command from being appended to a list already being walked.
+  std::scoped_lock lock(execution());
 
-    head = cmd.GetBatchHead();
-    Packet* packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
-    signal = packet->signal;
+  Packet* packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
+  Signal* signal = packet->signal;
+  amd::Command* head = cmd.GetBatchHead();
 
-    if (cpuWait) {
-      // The wait below outlives the packet, which drops its own reference.
-      signal->retain();
-    } else if (head != nullptr) {
-      // onDone may fire on a worker, on the app thread, or on the async thread,
-      // so it only posts.
-      signal->onDone([this, head] {
-        pool_.postAsync([head] { updateBatchState(head); });
-      });
-    }
+  if (cmd.CpuWaitRequested()) {
+    // The wait outlives the packet, which drops its own reference.
+    signal->retain();
     queue_->submit(packet);
-  }
-
-  // The only thread that blocks on a signal is the app thread, as specified.
-  if (cpuWait) {
     signal->wait();
     signal->release();
     if (head != nullptr) {
       updateBatchState(head);
     }
+    return;
   }
+
+  if (head != nullptr) {
+    // onDone may fire on a worker, on the app thread, or on the async thread, so
+    // it only posts.
+    signal->onDone([this, head] { pool_.postAsync([head] { updateBatchState(head); }); });
+  }
+  queue_->submit(packet);
 }
 
 void VirtualDevice::updateBatchState(amd::Command* list) {
