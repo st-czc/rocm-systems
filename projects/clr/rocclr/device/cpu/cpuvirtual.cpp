@@ -97,7 +97,8 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
         const address dstMem = static_cast<address>(hostMemory->cpuMap(*this)) + offset;
         submit(cmd, [=]() { std::memcpy(dstMem, src, size[0]); });
       } else {
-        submit(cmd, [=]() { std::memcpy(dst, src, size[0]); });
+        // Pageable host: run the copy on a worker, then wait for it.
+        submitSync(cmd, [=]() { std::memcpy(dst, src, size[0]); });
       }
       break;
     }
@@ -226,7 +227,7 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
           std::memcpy(dst, srcMem, size[0]);
         });
       } else {
-        submit(cmd, [=]() {
+        submitSync(cmd, [=]() {
           std::memcpy(dst, src, size[0]);
         });
       }
@@ -258,7 +259,7 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
       } else {
         const amd::BufferRect srcRect(cmd.hostRect());
         const amd::BufferRect dstRect(cmd.bufRect());
-        submit(cmd, [=]() {
+        submitSync(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + dstRect.offset(0, y, z),
@@ -296,7 +297,7 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
         });
       } else {
         const size_t rowPitch = size[0] * elementSize;
-        submit(cmd, [=]() {
+        submitSync(cmd, [=]() {
           for (size_t z = 0; z < size[2]; ++z) {
             for (size_t y = 0; y < size[1]; ++y) {
               std::memcpy(dst + firstRow + imageRowPitch * y + imageSlicePitch * z,
@@ -610,6 +611,17 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
       }
     }
   });
+}
+
+void VirtualDevice::submitSync(amd::Command& cmd, std::function<void()> work) {
+  std::scoped_lock lock(execution());
+  Packet* packet = pool_.newPacket(&cmd, 1, cmd.eventWaitList());
+  packet->task = [work = std::move(work)](int) { work(); };
+  Signal* signal = packet->signal;
+  signal->retain();
+  queue_->submit(packet);
+  signal->wait();
+  signal->release();
 }
 
 void VirtualDevice::submitMarker(amd::Marker& cmd) {

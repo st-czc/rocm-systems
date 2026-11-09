@@ -447,4 +447,8 @@ void NullDevice::fillDeviceInfo() {
   settings_->enableExtension(ClKhrByteAddressableStore);
 }
 
+bool Device::IsHwEventReady(const amd::Event& event, bool wait, amd::SyncPolicy policy) const {
+  return pool().isEventDone(&event);
+}
+
 }  // namespace amd::cpu

@@ -329,4 +329,13 @@ void Pool::donePacket(Packet* packet) {
   delete packet;
 }
 
+bool Pool::isEventDone(const Event* event) {
+  std::lock_guard<std::mutex> lock(event_lock_);
+  auto it = event_signals_.find(event);
+  if (it == event_signals_.end()) {
+    return true;
+  }
+  return it->second->isDone();
+}
+
 }  // namespace amd::cpu

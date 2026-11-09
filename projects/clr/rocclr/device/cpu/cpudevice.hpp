@@ -234,6 +234,9 @@ class Device : public NullDevice {
 
   virtual device::Signal* createSignal() const override { return new device::HostSignal; }
 
+  bool IsHwEventReady(const amd::Event& event, bool wait = false,
+                      amd::SyncPolicy policy = amd::SyncPolicy::Auto) const override;
+
   // Preserve the online device's existing query and placeholder behavior.
   virtual device::Memory* createView(amd::Memory& owner,
                                      const device::Memory& parent) const override {

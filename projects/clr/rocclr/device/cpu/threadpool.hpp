@@ -155,6 +155,7 @@ class Pool {
   //! Must be followed by submit(): only completion removes the table entry.
   Packet* newPacket(Event* event, uint32_t num_tickets, const EventWaitList& event_wait_list);
   void donePacket(Packet* packet);
+  bool isEventDone(const Event* event);
 
   void postAsync(AsyncHandler::Handler handler) { async_.post(std::move(handler)); }
 

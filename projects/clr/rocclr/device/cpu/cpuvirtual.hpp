@@ -116,6 +116,9 @@ class VirtualDevice : public device::VirtualDevice {
   //! Advances every command of the batch to COMPLETE and drops its batch reference.
   static void updateBatchState(amd::Command* list);
 
+  //! Submits a single-ticket packet and waits for its completion.
+  void submitSync(amd::Command& cmd, std::function<void()> work);
+
   const Device& dev_;
   Pool& pool_;
   Queue* queue_;
