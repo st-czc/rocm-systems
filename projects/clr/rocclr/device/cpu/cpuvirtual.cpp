@@ -9,6 +9,7 @@
 #include "device/blit.hpp"
 #include "device/cpu/cpudevice.hpp"
 #include "device/cpu/cpukernel.hpp"
+#include "device/cpu/threadpool.hpp"
 #include "os/os.hpp"
 #include "utils/debug.hpp"
 
@@ -81,12 +82,36 @@ class BlitManager final : public device::HostBlitManager {
   }
 };
 
-VirtualDevice::VirtualDevice(Device& device) : device::VirtualDevice(device), dev_(device) {
+VirtualDevice::VirtualDevice(Device& device)
+    : device::VirtualDevice(device),
+      dev_(device),
+      pool_(device.pool()),
+      queue_(device.pool().newQueue(this)) {
   blitMgr_ = new BlitManager(*this);
   LogPrintfInfo("CPU VirtualDevice created: virtual=%p device=%p", this, &device);
 }
 
-VirtualDevice::~VirtualDevice() { delete blitMgr_; }
+VirtualDevice::~VirtualDevice() {
+  delete blitMgr_;
+  pool_.deleteQueue(this);
+}
+
+void VirtualDevice::submit(amd::Command& cmd, std::function<bool()> work) {
+  // Make sure VirtualDevice has an exclusive access to the resources
+  std::scoped_lock lock(execution());
+
+  Packet* packet = pool_.newPacket(&cmd, 1, cmd.eventWaitList());
+  packet->task = [packet, work = std::move(work)](int) { work(); };
+  queue_->submit(packet);
+}
+
+//! An unimplemented command must still retire, or its batch never completes.
+void VirtualDevice::submitUnsupported(amd::Command& cmd, const char* command) {
+  std::scoped_lock lock(execution());
+
+  Unsupported(command);
+  cmd.setStatus(CL_INVALID_OPERATION);
+}
 
 void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
   // Make sure VirtualDevice has an exclusive access to the resources
@@ -109,7 +134,6 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
   amd::Coord3D size = cmd.size();
 
   cl_command_type type = cmd.type();
-  bool result = false;
   bool imageBuffer = false;
 
   // Force buffer read for IMAGE1D_BUFFER
@@ -118,72 +142,73 @@ void VirtualDevice::submitReadMemory(amd::ReadMemoryCommand& cmd) {
     imageBuffer = true;
   }
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    bool result = false;
 
-  switch (type) {
-    case CL_COMMAND_READ_BUFFER: {
-      if (devMem == nullptr) {
+    switch (type) {
+      case CL_COMMAND_READ_BUFFER: {
+        if (devMem == nullptr) {
+          break;
+        }
+
+        amd::Coord3D origin(cmd.origin()[0]);
+        if (imageBuffer) {
+          size_t elemSize = cmd.source().asImage()->getImageFormat().getElementSize();
+          origin.c[0] *= elemSize;
+          size.c[0] *= elemSize;
+        }
+        if (hostMemory != nullptr) {
+          // Accelerated transfer without pinning
+          amd::Coord3D dstOrigin(offset);
+          result = blitMgr().copyBuffer(*devMem, *hostMemory, origin, dstOrigin, size,
+                                        cmd.isEntireMemory(), cmd.copyMetadata());
+        } else {
+          result = blitMgr().readBuffer(*devMem, dst, origin, size, cmd.isEntireMemory(),
+                                        cmd.copyMetadata());
+        }
         break;
       }
+      case CL_COMMAND_READ_BUFFER_RECT: {
+        if (devMem == nullptr) {
+          break;
+        }
 
-      amd::Coord3D origin(cmd.origin()[0]);
-      if (imageBuffer) {
-        size_t elemSize = cmd.source().asImage()->getImageFormat().getElementSize();
-        origin.c[0] *= elemSize;
-        size.c[0] *= elemSize;
-      }
-      if (hostMemory != nullptr) {
-        // Accelerated transfer without pinning
-        amd::Coord3D dstOrigin(offset);
-        result = blitMgr().copyBuffer(*devMem, *hostMemory, origin, dstOrigin, size,
-                                      cmd.isEntireMemory(), cmd.copyMetadata());
-      } else {
-        result = blitMgr().readBuffer(*devMem, dst, origin, size, cmd.isEntireMemory(),
-                                      cmd.copyMetadata());
-      }
-      break;
-    }
-    case CL_COMMAND_READ_BUFFER_RECT: {
-      if (devMem == nullptr) {
+        amd::BufferRect hostbufferRect;
+        amd::Coord3D region(0);
+        amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
+        hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
+                              cmd.hostRect().slicePitch_);
+        if (hostMemory != nullptr) {
+          result = blitMgr().copyBufferRect(*devMem, *hostMemory, cmd.bufRect(), hostbufferRect,
+                                            size, cmd.isEntireMemory(), cmd.copyMetadata());
+        } else {
+          result = blitMgr().readBufferRect(*devMem, dst, cmd.bufRect(), cmd.hostRect(), size,
+                                            cmd.isEntireMemory(), cmd.copyMetadata());
+        }
         break;
       }
+      case CL_COMMAND_READ_IMAGE: {
+        if (devMem == nullptr) {
+          break;
+        }
 
-      amd::BufferRect hostbufferRect;
-      amd::Coord3D region(0);
-      amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
-      hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
-                            cmd.hostRect().slicePitch_);
-      if (hostMemory != nullptr) {
-        result = blitMgr().copyBufferRect(*devMem, *hostMemory, cmd.bufRect(), hostbufferRect, size,
-                                          cmd.isEntireMemory(), cmd.copyMetadata());
-      } else {
-        result = blitMgr().readBufferRect(*devMem, dst, cmd.bufRect(), cmd.hostRect(), size,
-                                          cmd.isEntireMemory(), cmd.copyMetadata());
-      }
-      break;
-    }
-    case CL_COMMAND_READ_IMAGE: {
-      if (devMem == nullptr) {
+        result = blitMgr().readImage(*devMem, dst, cmd.origin(), size, cmd.rowPitch(),
+                                     cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
         break;
       }
-
-      result = blitMgr().readImage(*devMem, dst, cmd.origin(), size, cmd.rowPitch(),
-                                   cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
-      break;
+      default:
+        break;
     }
-    default:
-      break;
-  }
 
-  if (!result) {
-    LogError("submitReadMemory failed!");
-    cmd.setStatus(CL_OUT_OF_RESOURCES);
-  } else {
-    LogPrintfInfo("CPU VirtualDevice::submitReadMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
-  }
+    if (!result) {
+      LogError("submitReadMemory failed!");
+    } else {
+      LogPrintfInfo("CPU VirtualDevice::submitReadMemory: %llu ns",
+                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    }
+    return result;
+  });
   // profilingEnd();
 }
 
@@ -210,7 +235,6 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
   amd::Coord3D size = cmd.size();
 
   cl_command_type type = cmd.type();
-  bool result = false;
   bool imageBuffer = false;
 
   // Force buffer write for IMAGE1D_BUFFER
@@ -220,80 +244,81 @@ void VirtualDevice::submitWriteMemory(amd::WriteMemoryCommand& cmd) {
     imageBuffer = true;
   }
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    bool result = false;
 
-  switch (type) {
-    case CL_COMMAND_WRITE_BUFFER: {
-      amd::Coord3D origin(cmd.origin()[0]);
-      if (imageBuffer) {
-        size_t elemSize = cmd.destination().asImage()->getImageFormat().getElementSize();
-        origin.c[0] *= elemSize;
-        size.c[0] *= elemSize;
-      }
-      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+    switch (type) {
+      case CL_COMMAND_WRITE_BUFFER: {
+        amd::Coord3D origin(cmd.origin()[0]);
+        if (imageBuffer) {
+          size_t elemSize = cmd.destination().asImage()->getImageFormat().getElementSize();
+          origin.c[0] *= elemSize;
+          size.c[0] *= elemSize;
+        }
+        if (devMem == nullptr || devMem->virtualAddress() == 0) {
+          break;
+        }
+
+        if (hostMemory != nullptr) {
+          // Accelerated transfer without pinning
+          amd::Coord3D srcOrigin(offset);
+          result = blitMgr().copyBuffer(*hostMemory, *devMem, srcOrigin, origin, size,
+                                        cmd.isEntireMemory(), cmd.copyMetadata());
+        } else {
+          result = blitMgr().writeBuffer(src, *devMem, origin, size, cmd.isEntireMemory(),
+                                         cmd.copyMetadata());
+        }
         break;
       }
+      case CL_COMMAND_WRITE_BUFFER_RECT: {
+        amd::BufferRect hostbufferRect;
+        amd::Coord3D region(0);
+        amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
+        hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
+                              cmd.hostRect().slicePitch_);
+        if (devMem == nullptr || devMem->virtualAddress() == 0) {
+          break;
+        }
 
-      if (hostMemory != nullptr) {
-        // Accelerated transfer without pinning
-        amd::Coord3D srcOrigin(offset);
-        result = blitMgr().copyBuffer(*hostMemory, *devMem, srcOrigin, origin, size,
-                                      cmd.isEntireMemory(), cmd.copyMetadata());
-      } else {
-        result = blitMgr().writeBuffer(src, *devMem, origin, size, cmd.isEntireMemory(),
-                                       cmd.copyMetadata());
-      }
-      break;
-    }
-    case CL_COMMAND_WRITE_BUFFER_RECT: {
-      amd::BufferRect hostbufferRect;
-      amd::Coord3D region(0);
-      amd::Coord3D hostOrigin(cmd.hostRect().start_ + offset);
-      hostbufferRect.create(hostOrigin.c, size.c, cmd.hostRect().rowPitch_,
-                            cmd.hostRect().slicePitch_);
-      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+        if (hostMemory != nullptr) {
+          result = blitMgr().copyBufferRect(*hostMemory, *devMem, hostbufferRect, cmd.bufRect(),
+                                            size, cmd.isEntireMemory(), cmd.copyMetadata());
+        } else {
+          result = blitMgr().writeBufferRect(src, *devMem, cmd.hostRect(), cmd.bufRect(), size,
+                                             cmd.isEntireMemory(), cmd.copyMetadata());
+        }
         break;
       }
+      case CL_COMMAND_WRITE_IMAGE: {
+        if (devMem == nullptr || devMem->virtualAddress() == 0) {
+          break;
+        }
 
-      if (hostMemory != nullptr) {
-        result = blitMgr().copyBufferRect(*hostMemory, *devMem, hostbufferRect, cmd.bufRect(), size,
-                                          cmd.isEntireMemory(), cmd.copyMetadata());
-      } else {
-        result = blitMgr().writeBufferRect(src, *devMem, cmd.hostRect(), cmd.bufRect(), size,
-                                           cmd.isEntireMemory(), cmd.copyMetadata());
-      }
-      break;
-    }
-    case CL_COMMAND_WRITE_IMAGE: {
-      if (devMem == nullptr || devMem->virtualAddress() == 0) {
+        if (hostMemory != nullptr) {
+          amd::Coord3D srcOrigin(offset);
+          result = blitMgr().copyBufferToImage(*hostMemory, *devMem, srcOrigin, cmd.origin(), size,
+                                               cmd.isEntireMemory(), cmd.rowPitch(),
+                                               cmd.slicePitch(), cmd.copyMetadata());
+        } else {
+          result = blitMgr().writeImage(src, *devMem, cmd.origin(), size, cmd.rowPitch(),
+                                        cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
+        }
         break;
       }
-
-      if (hostMemory != nullptr) {
-        amd::Coord3D srcOrigin(offset);
-        result = blitMgr().copyBufferToImage(*hostMemory, *devMem, srcOrigin, cmd.origin(), size,
-                                             cmd.isEntireMemory(), cmd.rowPitch(), cmd.slicePitch(),
-                                             cmd.copyMetadata());
-      } else {
-        result = blitMgr().writeImage(src, *devMem, cmd.origin(), size, cmd.rowPitch(),
-                                      cmd.slicePitch(), cmd.isEntireMemory(), cmd.copyMetadata());
-      }
-      break;
+      default:
+        break;
     }
-    default:
-      break;
-  }
 
-  if (!result) {
-    LogError("submitWriteMemory failed!");
-    cmd.setStatus(CL_OUT_OF_RESOURCES);
-  } else {
-    cmd.destination().signalWrite(&dev_);
-    LogPrintfInfo("CPU VirtualDevice::submitWriteMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
-  }
+    if (!result) {
+      LogError("submitWriteMemory failed!");
+    } else {
+      cmd.destination().signalWrite(&dev_);
+      LogPrintfInfo("CPU VirtualDevice::submitWriteMemory: %llu ns",
+                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    }
+    return result;
+  });
   // profilingEnd();
 }
 
@@ -305,7 +330,6 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
 
   cl_command_type type = cmd.type();
   bool entire = cmd.isEntireMemory();
-  bool result = false;
 
   Memory* srcDevMem = static_cast<Memory*>(cmd.source().getDeviceMemory(dev_, false));
   Memory* dstDevMem = static_cast<Memory*>(cmd.destination().getDeviceMemory(dev_, false));
@@ -321,65 +345,66 @@ void VirtualDevice::submitCopyMemory(amd::CopyMemoryCommand& cmd) {
   dstDevMem->syncCacheFromHost(*this, syncFlags);
   srcDevMem->syncCacheFromHost(*this);
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    bool result = false;
 
-  switch (type) {
-    case CL_COMMAND_SVM_MEMCPY:
-    case CL_COMMAND_COPY_BUFFER: {
-      result = blitMgr().copyBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                    cmd.size(), entire, cmd.copyMetadata());
-      break;
-    }
-    case CL_COMMAND_COPY_BUFFER_RECT: {
-      result = blitMgr().copyBufferRect(*srcDevMem, *dstDevMem, cmd.srcRect(), cmd.dstRect(),
-                                        cmd.size(), entire, cmd.copyMetadata());
-      break;
-    }
-    case CL_COMMAND_COPY_IMAGE: {
-      result = blitMgr().copyImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
-                                   cmd.size(), entire, cmd.copyMetadata());
-      break;
-    }
-    case CL_COMMAND_COPY_IMAGE_TO_BUFFER: {
-      const size_t rowPitch = cmd.dstRect().rowPitch_;
-      const size_t elementSize = cmd.source().asImage()->getImageFormat().getElementSize();
-      if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
-        result = copyImageToBufferRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
-                                       cmd.dstRect().slicePitch_);
-      } else {
-        result = blitMgr().copyImageToBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
-                                             cmd.dstOrigin(), cmd.size(), entire, rowPitch,
-                                             cmd.dstRect().slicePitch_, cmd.copyMetadata());
+    switch (type) {
+      case CL_COMMAND_SVM_MEMCPY:
+      case CL_COMMAND_COPY_BUFFER: {
+        result = blitMgr().copyBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
+                                      cmd.size(), entire, cmd.copyMetadata());
+        break;
       }
-      break;
-    }
-    case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
-      const size_t rowPitch = cmd.srcRect().rowPitch_;
-      const size_t elementSize = cmd.destination().asImage()->getImageFormat().getElementSize();
-      if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
-        result = copyBufferToImageRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
-                                       cmd.srcRect().slicePitch_);
-      } else {
-        result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
-                                             cmd.dstOrigin(), cmd.size(), entire, rowPitch,
-                                             cmd.srcRect().slicePitch_, cmd.copyMetadata());
+      case CL_COMMAND_COPY_BUFFER_RECT: {
+        result = blitMgr().copyBufferRect(*srcDevMem, *dstDevMem, cmd.srcRect(), cmd.dstRect(),
+                                          cmd.size(), entire, cmd.copyMetadata());
+        break;
       }
-      break;
+      case CL_COMMAND_COPY_IMAGE: {
+        result = blitMgr().copyImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(), cmd.dstOrigin(),
+                                     cmd.size(), entire, cmd.copyMetadata());
+        break;
+      }
+      case CL_COMMAND_COPY_IMAGE_TO_BUFFER: {
+        const size_t rowPitch = cmd.dstRect().rowPitch_;
+        const size_t elementSize = cmd.source().asImage()->getImageFormat().getElementSize();
+        if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
+          result = copyImageToBufferRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
+                                         cmd.dstRect().slicePitch_);
+        } else {
+          result = blitMgr().copyImageToBuffer(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
+                                               cmd.dstOrigin(), cmd.size(), entire, rowPitch,
+                                               cmd.dstRect().slicePitch_, cmd.copyMetadata());
+        }
+        break;
+      }
+      case CL_COMMAND_COPY_BUFFER_TO_IMAGE: {
+        const size_t rowPitch = cmd.srcRect().rowPitch_;
+        const size_t elementSize = cmd.destination().asImage()->getImageFormat().getElementSize();
+        if (rowPitch != 0 && rowPitch != cmd.size()[0] * elementSize) {
+          result = copyBufferToImageRows(*srcDevMem, *dstDevMem, cmd, rowPitch,
+                                         cmd.srcRect().slicePitch_);
+        } else {
+          result = blitMgr().copyBufferToImage(*srcDevMem, *dstDevMem, cmd.srcOrigin(),
+                                               cmd.dstOrigin(), cmd.size(), entire, rowPitch,
+                                               cmd.srcRect().slicePitch_, cmd.copyMetadata());
+        }
+        break;
+      }
+      default:
+        break;
     }
-    default:
-      break;
-  }
 
-  if (!result) {
-    LogError("submitCopyMemory failed!");
-    cmd.setStatus(CL_INVALID_OPERATION);
-  } else {
-    cmd.destination().signalWrite(&dev_);
-    LogPrintfInfo("CPU VirtualDevice::submitCopyMemory: %llu ns",
-                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
-  }
+    if (!result) {
+      LogError("submitCopyMemory failed!");
+    } else {
+      cmd.destination().signalWrite(&dev_);
+      LogPrintfInfo("CPU VirtualDevice::submitCopyMemory: %llu ns",
+                    static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    }
+    return result;
+  });
   // profilingEnd();
 }
 
@@ -408,21 +433,20 @@ void VirtualDevice::submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
     srcDevMem->syncCacheFromHost(*this);
   }
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    if (!blitMgr().copyBufferBatch(copyOps)) {
+      LogError("submitBatchCopyMemory failed!");
+      return false;
+    }
 
-  if (!blitMgr().copyBufferBatch(copyOps)) {
-    LogError("submitBatchCopyMemory failed!");
-    cmd.setStatus(CL_OUT_OF_RESOURCES);
-    return;
-  }
-
-  for (const auto& op : copyOps) {
-    op.dstMemory->signalWrite(&dev_);
-  }
-  LogPrintfInfo("CPU VirtualDevice::submitBatchCopyMemory: %llu ns",
-                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    for (const auto& op : copyOps) {
+      op.dstMemory->signalWrite(&dev_);
+    }
+    LogPrintfInfo("CPU VirtualDevice::submitBatchCopyMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    return true;
+  });
 }
 
 void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
@@ -435,21 +459,20 @@ void VirtualDevice::SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
     return;
   }
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    if (!blitMgr().WriteBufferBatch(writeOps)) {
+      LogError("SubmitBatchWriteMemory: Batch write failed!");
+      return false;
+    }
 
-  if (!blitMgr().WriteBufferBatch(writeOps)) {
-    LogError("SubmitBatchWriteMemory: Batch write failed!");
-    cmd.setStatus(CL_OUT_OF_RESOURCES);
-    return;
-  }
-
-  for (const auto& op : writeOps) {
-    op.dst_memory->signalWrite(&dev_);
-  }
-  LogPrintfInfo("CPU VirtualDevice::SubmitBatchWriteMemory: %llu ns",
-                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    for (const auto& op : writeOps) {
+      op.dst_memory->signalWrite(&dev_);
+    }
+    LogPrintfInfo("CPU VirtualDevice::SubmitBatchWriteMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    return true;
+  });
 }
 
 void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
@@ -462,18 +485,17 @@ void VirtualDevice::SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
     return;
   }
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    if (!blitMgr().ReadBufferBatch(readOps)) {
+      LogError("SubmitBatchReadMemory: Batch read failed!");
+      return false;
+    }
 
-  if (!blitMgr().ReadBufferBatch(readOps)) {
-    LogError("SubmitBatchReadMemory: Batch read failed!");
-    cmd.setStatus(CL_OUT_OF_RESOURCES);
-    return;
-  }
-
-  LogPrintfInfo("CPU VirtualDevice::SubmitBatchReadMemory: %llu ns",
-                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
+    LogPrintfInfo("CPU VirtualDevice::SubmitBatchReadMemory: %llu ns",
+                  static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
+    return true;
+  });
 }
 
 //! HostBlitManager advances the buffer by the copied row width, not by the
@@ -523,9 +545,6 @@ bool VirtualDevice::copyImageToBufferRows(device::Memory& srcMemory, device::Mem
 bool VirtualDevice::fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
                                size_t patternSize, const amd::Coord3D& surface,
                                const amd::Coord3D& origin, const amd::Coord3D& size) {
-  // Make sure VirtualDevice has an exclusive access to the resources
-  std::scoped_lock lock(execution());
-
   Memory* memory = dev().getCPUMemory(amdMemory);
 
   bool entire = amdMemory->isEntirelyCovered(origin, size);
@@ -565,21 +584,48 @@ void VirtualDevice::submitFillMemory(amd::FillMemoryCommand& cmd) {
 
   // profilingBegin(cmd, true);
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
-
-  if (!fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
-                  cmd.origin(), cmd.size())) {
-    cmd.setStatus(CL_INVALID_OPERATION);
-  } else {
+  submit(cmd, [=, &cmd]() mutable {
+    const uint64_t startTime = amd::Os::timeNanos();
+    if (!fillMemory(cmd.type(), &cmd.memory(), cmd.pattern(), cmd.patternSize(), cmd.surface(),
+                    cmd.origin(), cmd.size())) {
+      return false;
+    }
     LogPrintfInfo("CPU VirtualDevice::submitFillMemory: %llu ns",
                   static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-    cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
-  }
+    return true;
+  });
   // profilingEnd();
 }
 
-void VirtualDevice::submitMarker(amd::Marker& cmd) { flush(cmd.GetBatchHead()); }
+void VirtualDevice::submitMarker(amd::Marker& cmd) {
+  std::scoped_lock lock(execution());
+
+  Packet* packet = pool_.newPacket(&cmd, 0, cmd.eventWaitList());
+  Signal* signal = packet->signal;
+
+  amd::Command* head = cmd.GetBatchHead();
+  if (head != nullptr) {
+    signal->onDone([this, head] {
+      pool_.postAsync([head] { updateBatchState(head); });
+    });
+  }
+  queue_->submit(packet);
+}
+
+void VirtualDevice::updateBatchState(amd::Command* list) {
+  const uint64_t now = amd::Os::timeNanos();
+  for (amd::Command* current = list; current != nullptr;) {
+    amd::Command* next = current->getNext();
+    if (current->status() == CL_SUBMITTED) {
+      current->setStatus(CL_RUNNING, now);
+      current->setStatus(CL_COMPLETE, now);
+    }
+    current->release();
+    current = next;
+  }
+}
+
+void VirtualDevice::flush(amd::Command* list, bool) {}
 
 void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
   const amd::Kernel& kernel = cmd.kernel();
@@ -667,27 +713,6 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
   LogPrintfInfo("CPU VirtualDevice::submitKernel: %llu ns",
                 static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
   cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
-}
-
-void VirtualDevice::flush(amd::Command* list, bool) {
-  std::scoped_lock lock(execution());
-
-  amd::Command* current = list;
-  while (current != nullptr) {
-    amd::Command* next = current->getNext();
-    if (current->status() == CL_SUBMITTED || current->status() == CL_RUNNING) {
-      const uint64_t timeStamp = amd::Os::timeNanos();
-      if (current->status() == CL_SUBMITTED) {
-        current->setStatus(CL_RUNNING, timeStamp);
-      }
-      current->setStatus(CL_COMPLETE, timeStamp);
-    } else if (current->status() > CL_COMPLETE) {
-      LogPrintfError("Unexpected command status - %d.", current->status());
-    }
-
-    current->release();
-    current = next;
-  }
 }
 
 void VirtualDevice::Unsupported(const char* command) {

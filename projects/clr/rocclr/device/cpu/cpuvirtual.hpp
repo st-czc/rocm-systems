@@ -10,11 +10,14 @@
 #include "device/device.hpp"
 
 #include <cstdint>
+#include <functional>
 
 //! CPU Device Implementation
 namespace amd::cpu {
 
 class Device;
+class Pool;
+class Queue;
 
 //! Host execution environment for one command queue. It runs supported memory
 //! commands synchronously in process memory.
@@ -93,7 +96,18 @@ class VirtualDevice : public device::VirtualDevice {
   //! The host backend implements no command.
   void Unsupported(const char* command);
 
+  //! Submits one command as a single-ticket packet. work runs on a pool worker.
+  void submit(amd::Command& cmd, std::function<bool()> work);
+
+  //! Fails a command the backend does not implement, without submitting it.
+  void submitUnsupported(amd::Command& cmd, const char* command);
+
+  //! Advances every command of the batch to COMPLETE and drops its batch reference.
+  static void updateBatchState(amd::Command* list);
+
   const Device& dev_;
+  Pool& pool_;
+  Queue* queue_;
 
   //! Disable default copy constructor
   VirtualDevice(const VirtualDevice&);
