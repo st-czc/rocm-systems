@@ -108,9 +108,6 @@ struct Packet {
   Packet& operator=(const Packet&) = delete;
 
   Ticket getTicket() {
-    if (num_tickets.load(std::memory_order_relaxed) == 0) {
-      return std::nullopt;
-    }
     uint32_t ticket = num_tickets.load(std::memory_order_relaxed);
     do {
       if (ticket == 0) {
@@ -128,10 +125,11 @@ class Queue {
   explicit Queue(Pool& pool);
 
   void submit(Packet* packet);
-  Packet* nextPacket(bool busy_done);
   Packet* nextTaskPacket(bool busy_done);
 
  private:
+  Packet* nextPacket(bool busy_done);
+
   Pool& pool_;
   std::mutex lock_;
   std::deque<Packet*> packets_;

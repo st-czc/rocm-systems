@@ -20,9 +20,10 @@ void Signal::notify() {
 }
 
 void Signal::wait() {
-  auto ready = std::promise<void>();
-  auto future = ready.get_future();
-  onDone([&ready] { ready.set_value(); });
+  if (isDone()) return;
+  auto ready = std::make_shared<std::promise<void>>();
+  auto future = ready->get_future();
+  onDone([ready = std::move(ready)] { ready->set_value(); });
   future.wait();
 }
 
@@ -63,7 +64,7 @@ Packet* Queue::nextPacket(bool busy_done) {
       busy_ = false;
     }
     if (busy_ || packets_.empty() || (num_waiting_ != 0)) {
-      return {};
+      return nullptr;
     }
     packet = packets_.front();
     if (waiting_ready_) {
@@ -111,7 +112,7 @@ Packet* Queue::nextPacket(bool busy_done) {
       pool_.submit(nextTaskPacket(false));
     });
   }
-  return {};
+  return nullptr;
 }
 
 Pool::Pool(uint32_t workers) {
@@ -177,7 +178,7 @@ void Pool::loop(Pool* pool) {
         packet = queue->nextTaskPacket(true);
         if (packet != nullptr) {
           ticket = packet->getTicket();
-          if (ticket != 0) {
+          if (ticket.value_or(0) != 0) {
             packet->num_owners += 1;
             pool->submit(packet);
             notified = true;
@@ -200,7 +201,6 @@ Queue* Pool::newQueue() {
 
 Packet::Packet(Event* event, uint32_t num_tickets)
     : event(event), num_owners(1), num_tickets(num_tickets) {
-  task = nullptr;
   event->retain();
   signal = new Signal;
 }
