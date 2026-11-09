@@ -92,6 +92,10 @@ class VirtualDevice : public device::VirtualDevice {
   //! and does no bookkeeping: the decision it runs was made before submission.
   void submit(amd::Command& cmd, std::function<void()> work);
 
+  //! Submits a command whose work splits across numTickets workers. task takes
+  //! the ticket, handed out in descending order.
+  void submit(amd::Command& cmd, uint32_t numTickets, std::function<void(int)> task);
+
   //! Fails a command the backend does not implement, without submitting it.
   void submitUnsupported(amd::Command& cmd, const char* command);
 

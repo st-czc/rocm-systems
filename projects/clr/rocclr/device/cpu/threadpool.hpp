@@ -155,6 +155,9 @@ class Pool {
 
   void submit(Packet* packet);
 
+  //! Number of workers that can claim tickets from a packet.
+  uint32_t numWorkers() const { return static_cast<uint32_t>(workers_.size()); }
+
   //! |owner| is the stream that owns the queue, opaque here. Pass it back to
   //! deleteQueue.
   Queue* newQueue(const void* owner);

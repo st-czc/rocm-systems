@@ -97,11 +97,16 @@ VirtualDevice::~VirtualDevice() {
 }
 
 void VirtualDevice::submit(amd::Command& cmd, std::function<void()> work) {
+  submit(cmd, 1, [work = std::move(work)](int) { work(); });
+}
+
+void VirtualDevice::submit(amd::Command& cmd, uint32_t numTickets,
+                           std::function<void(int)> task) {
   // Make sure VirtualDevice has an exclusive access to the resources
   std::scoped_lock lock(execution());
 
-  Packet* packet = pool_.newPacket(&cmd, 1, cmd.eventWaitList());
-  packet->task = [work = std::move(work)](int) { work(); };
+  Packet* packet = pool_.newPacket(&cmd, numTickets, cmd.eventWaitList());
+  packet->task = std::move(task);
   queue_->submit(packet);
 }
 
@@ -787,38 +792,38 @@ void VirtualDevice::submitKernel(amd::NDRangeKernelCommand& cmd) {
                 reinterpret_cast<void*>(hostKernel->entry()), state.num_groups[0],
                 state.num_groups[1], state.num_groups[2]);
 
-  cmd.setStatus(CL_RUNNING, amd::Os::timeNanos());
-  const uint64_t startTime = amd::Os::timeNanos();
-
-  // The workers divide the flattened group list into contiguous blocks.
   const Subhandler entry = hostKernel->entry();
   const size_t sharedMemBytes = static_cast<size_t>(cmd.sharedMemBytes());
-  const size_t numGroups[3] = {state.num_groups[0], state.num_groups[1], state.num_groups[2]};
-  const size_t totalGroups = numGroups[0] * numGroups[1] * numGroups[2];
+  const size_t totalGroups =
+      state.num_groups[0] * state.num_groups[1] * state.num_groups[2];
+  if (totalGroups == 0) {
+    cmd.setStatus(CL_INVALID_OPERATION);
+    return;
+  }
 
-  dev_.threadPool().run([&](size_t tid, size_t numThreads) {
-    NativeCpuState threadState = state;
+  // One ticket per worker, or one per group when there are fewer groups than
+  // workers. Tickets are handed out in descending order, so the remainder lands
+  // on the high tickets that start first.
+  const uint32_t numTickets = static_cast<uint32_t>(std::min<size_t>(
+      totalGroups, std::max<uint32_t>(pool_.numWorkers(), 1)));
+  const size_t groupsPerTicket = totalGroups / numTickets;
+  const size_t remainder = totalGroups % numTickets;
 
-    // Each worker gets the same number of groups, or one more. The extra
-    // groups go to the last workers.
-    const size_t groupsPerWorker = totalGroups / numThreads;
-    const size_t remainder = totalGroups % numThreads;
-    const size_t smallWorkers = numThreads - remainder;
-    const bool isLarge = (tid >= smallWorkers);
-    const size_t begin =
-        isLarge ? smallWorkers * groupsPerWorker + (tid - smallWorkers) * (groupsPerWorker + 1)
-                : tid * groupsPerWorker;
-    const size_t count = isLarge ? groupsPerWorker + 1 : groupsPerWorker;
+  // The subhandler reads the argument vector directly; resolve it once here so
+  // the task captures a plain pointer.
+  void** kernelArgs = args.data();
 
-    // The subhandler expects a non-empty group range.
-    if (count == 0) return;
+  submit(cmd, numTickets, [=](int ticket) {
+    // Tickets are handed out high to low, so the larger share goes to the high
+    // tickets that start first: the last `remainder` tickets take one extra.
+    const size_t t = static_cast<size_t>(ticket);
+    const bool isLarge = t >= numTickets - remainder;
+    const size_t begin = groupsPerTicket * t + (isLarge ? t - (numTickets - remainder) : 0);
+    const size_t count = groupsPerTicket + (isLarge ? 1 : 0);
 
-    entry(args.data(), &threadState, begin, begin + count, sharedMemBytes);
+    NativeCpuState ticketState = state;
+    entry(kernelArgs, &ticketState, begin, begin + count, sharedMemBytes);
   });
-
-  LogPrintfInfo("CPU VirtualDevice::submitKernel: %llu ns",
-                static_cast<unsigned long long>(amd::Os::timeNanos() - startTime));
-  cmd.setStatus(CL_COMPLETE, amd::Os::timeNanos());
 }
 
 void VirtualDevice::Unsupported(const char* command) {
