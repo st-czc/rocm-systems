@@ -52,6 +52,16 @@ void Queue::submit(Packet* packet) {
 Packet* Queue::nextTaskPacket(bool busy_done) {
   Packet* packet = nextPacket(busy_done);
   while (packet && packet->num_tickets == 0) {
+    if (packet->task) {
+      // A marker's task is its batch completion: run it on the async thread,
+      // then retire the packet and continue the queue.
+      pool_.postAsync([this, packet] {
+        packet->task(0);
+        pool_.donePacket(packet);
+        pool_.submit(nextTaskPacket(true));
+      });
+      return nullptr;
+    }
     pool_.donePacket(packet);
     packet = nextPacket(true);
   }

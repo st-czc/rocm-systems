@@ -741,9 +741,7 @@ void VirtualDevice::submitMarker(amd::Marker& cmd) {
   }
 
   if (head != nullptr) {
-    // onDone may fire on a worker, on the app thread, or on the async thread, so
-    // it only posts.
-    signal->onDone([this, head] { pool_.postAsync([head] { updateBatchState(head); }); });
+    packet->task = [head](int) { updateBatchState(head); };
   }
   queue_->submit(packet);
 }
