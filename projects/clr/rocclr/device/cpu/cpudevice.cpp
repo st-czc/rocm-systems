@@ -20,6 +20,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -152,6 +153,14 @@ bool Device::create(const amd::Isa& isa) {
 
   if (!threadPool_.start(std::thread::hardware_concurrency())) {
     LogError("Unable to start the CPU thread pool!");
+    return false;
+  }
+
+  try {
+    pool_.reset(new Pool(std::thread::hardware_concurrency()));
+  } catch (const std::system_error& error) {
+    LogPrintfError("Unable to start the CPU thread pool: %s", error.what());
+    pool_.reset();
     return false;
   }
 

@@ -15,7 +15,9 @@
 #include "cpumemory.hpp"
 #include "cputhreadpool.hpp"
 #include "cpuvirtual.hpp"
+#include "threadpool.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -226,6 +228,9 @@ class Device : public NullDevice {
   //! Returns the launch thread pool shared by all virtual devices
   ThreadPool& threadPool() const { return threadPool_; }
 
+  //! Returns the scheduling pool that owns every queue, worker and signal
+  Pool& pool() const { return *pool_; }
+
   virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
                          cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
                          void* svmPtr = nullptr) const override;
@@ -302,6 +307,9 @@ class Device : public NullDevice {
 
   //! The launch thread pool owned by this device
   mutable ThreadPool threadPool_;
+
+  //! Scheduler shared by every command queue of this device
+  std::unique_ptr<Pool> pool_;
 
   //! Disable default copy constructor
   Device(const Device&);
