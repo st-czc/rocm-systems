@@ -16,6 +16,7 @@
 #include "cpuvirtual.hpp"
 #include "threadpool.hpp"
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -227,6 +228,9 @@ class Device : public NullDevice {
   //! Returns the scheduling pool that owns every queue, worker and signal
   Pool& pool() const { return *pool_; }
 
+  void addAllocatedBytes(size_t bytes) const;
+  void subAllocatedBytes(size_t bytes) const;
+
   virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
                          cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
                          void* svmPtr = nullptr) const override;
@@ -310,6 +314,9 @@ class Device : public NullDevice {
 
   //! Scheduler shared by every command queue of this device
   std::unique_ptr<Pool> pool_;
+
+  //! Bytes handed out by device-side allocations, subtracted from free memory
+  mutable std::atomic<uint64_t> allocatedBytes_{0};
 
   //! Disable default copy constructor
   Device(const Device&);

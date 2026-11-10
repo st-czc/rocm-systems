@@ -69,6 +69,7 @@ class Memory : public device::Memory {
   const Device& dev_;  //!< The host device that owns this memory
   address ptr_;        //!< Host allocation backing the memory object
   StorageOwnership ownership_;  //!< Selects whether and how ptr_ is released
+  size_t countedBytes_;  //!< Bytes this object accounted as a device allocation
 };
 
 //! CPU-side backing for an amd::Image object. The descriptor storage starts

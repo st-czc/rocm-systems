@@ -134,7 +134,11 @@ std::tuple<uint32_t, uint32_t, uint32_t> getSrdFormat(const amd::Image& image) {
 }  // namespace
 
 Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
-    : device::Memory(owner), dev_(dev), ptr_(nullptr), ownership_(StorageOwnership::Borrowed) {
+    : device::Memory(owner),
+      dev_(dev),
+      ptr_(nullptr),
+      ownership_(StorageOwnership::Borrowed),
+      countedBytes_(0) {
   if (owner.parent() != nullptr) {
     device::Memory* parent = owner.parent()->getDeviceMemory(dev_);
     if (parent == nullptr || parent->virtualAddress() == 0) {
@@ -166,6 +170,10 @@ Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
     if (!allocate(owner.getSize(),
                   std::max(alignment, static_cast<size_t>(owner.getAlignment())))) {
       return;
+    }
+    if ((owner.getMemFlags() & CL_MEM_SVM_FINE_GRAIN_BUFFER) == 0) {
+      countedBytes_ = owner.getSize();
+      dev_.addAllocatedBytes(countedBytes_);
     }
     if (ptr_ != nullptr && (owner.getMemFlags() & CL_MEM_COPY_HOST_PTR) &&
         owner.getHostMem() != nullptr) {
@@ -213,6 +221,10 @@ void Memory::release() {
   }
   if (ownership_ == StorageOwnership::AlignedAllocation) {
     amd::AlignedMemory::deallocate(ptr_);
+  }
+  if (countedBytes_ != 0) {
+    dev_.subAllocatedBytes(countedBytes_);
+    countedBytes_ = 0;
   }
   ptr_ = nullptr;
   ownership_ = StorageOwnership::Borrowed;

@@ -363,14 +363,29 @@ void Device::svmFree(void* ptr) const {
   }
 }
 
+void Device::addAllocatedBytes(size_t bytes) const {
+  allocatedBytes_.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void Device::subAllocatedBytes(size_t bytes) const {
+  uint64_t allocated = allocatedBytes_.load(std::memory_order_relaxed);
+  while (!allocatedBytes_.compare_exchange_weak(
+      allocated, (bytes >= allocated) ? 0 : allocated - bytes, std::memory_order_relaxed)) {
+  }
+}
+
 bool Device::globalFreeMemory(size_t* freeMemory) const {
   constexpr size_t kTotalFreeMemory = 0;
   constexpr size_t kLargestFreeBlock = 1;
 
-  uint64_t available = info_.globalMemSize_;
+  const uint64_t allocated = allocatedBytes_.load(std::memory_order_relaxed);
+  const uint64_t deviceAvailable =
+      (allocated >= info_.globalMemSize_) ? 0 : info_.globalMemSize_ - allocated;
+
+  uint64_t available = deviceAvailable;
   uint64_t hostAvailable;
   if (hostAvailableMemory(hostAvailable)) {
-    available = std::min(hostAvailable, info_.globalMemSize_);
+    available = std::min(hostAvailable, deviceAvailable);
   }
 
   freeMemory[kTotalFreeMemory] = static_cast<size_t>(available / Ki);
