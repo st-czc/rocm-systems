@@ -8,6 +8,7 @@
 
 #include "device/cpu/cpudevice.hpp"
 #include "os/alloc.hpp"
+#include "os/os.hpp"
 #include "utils/debug.hpp"
 #include "utils/util.hpp"
 
@@ -15,9 +16,29 @@
 #include <cstring>
 #include <tuple>
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
+
 namespace amd::cpu {
 
 namespace {
+
+bool isMappedRange(const void* ptr, size_t size) {
+#if defined(__linux__)
+  const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+  const uintptr_t begin = alignUp(addr, amd::Os::pageSize());
+  const uintptr_t end = addr + size;
+  if (begin >= end) {
+    return true;
+  }
+  return msync(reinterpret_cast<void*>(begin), end - begin, MS_ASYNC) == 0;
+#else
+  (void)ptr;
+  (void)size;
+  return true;
+#endif
+}
 
 // Channel format fields shared by the buffer resource descriptor (V#) and the
 // image resource descriptor (T#). Returns {dstSel, dataFormat, numFormat}.
@@ -135,6 +156,11 @@ Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
   } else if (owner.getHostMem() != nullptr && !allocateSvm &&
              !(owner.getMemFlags() & CL_MEM_COPY_HOST_PTR)) {
     // Borrow host backing supplied by the application or the owner.
+    if ((owner.getMemFlags() & CL_MEM_USE_HOST_PTR) &&
+        !isMappedRange(owner.getHostMem(), owner.getSize())) {
+      LogError("Registered host memory is not mapped!");
+      return;
+    }
     ptr_ = static_cast<address>(owner.getHostMem());
   } else {
     if (!allocate(owner.getSize(),

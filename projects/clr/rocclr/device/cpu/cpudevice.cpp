@@ -404,6 +404,7 @@ void NullDevice::fillDeviceInfo() {
   info_.localMemSize_ = 64 * Ki;
   info_.localMemSizePerCU_ = 64 * Ki;
   info_.globalMemSize_ = amd::Os::hostTotalPhysicalMemory() / 2;
+  info_.globalMemSize_ = std::min(info_.globalMemSize_, static_cast<uint64_t>(64 * Gi));
   info_.globalMemSize_ = std::max(info_.globalMemSize_, static_cast<uint64_t>(1 * Gi));
   info_.maxMemAllocSize_ = amd::alignDown(info_.globalMemSize_, sizeof(uint64_t));
   info_.maxPhysicalMemAllocSize_ = amd::Os::getPhysicalMemSize();
