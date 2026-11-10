@@ -217,8 +217,7 @@ Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
 
   const cl_mem_flags memFlags = owner.getMemFlags();
   if ((memFlags & (CL_MEM_VA_RANGE_AMD | CL_MEM_BUS_ADDRESSABLE_AMD |
-                   CL_MEM_EXTERNAL_PHYSICAL_AMD | ROCCLR_MEM_INTERPROCESS |
-                   ROCCLR_MEM_HSA_SIGNAL_MEMORY)) ||
+                   ROCCLR_MEM_INTERPROCESS | ROCCLR_MEM_HSA_SIGNAL_MEMORY)) ||
       owner.ipcShared() ||
       owner.getSvmPtr() == reinterpret_cast<void*>(amd::Memory::MemoryType::kArenaMemoryPtr)) {
     LogError("Unsupported CPU buffer memory requirements!");
