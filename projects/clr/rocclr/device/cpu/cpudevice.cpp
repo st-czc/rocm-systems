@@ -462,6 +462,7 @@ void NullDevice::fillDeviceInfo() {
   // hipMalloc3D produce a nonzero, aligned pitch even without image support.
   info_.imagePitchAlignment_ = 256;
   info_.imageBaseAddressAlignment_ = 256;
+  info_.image1DMaxWidth_ = 16384;
   info_.image2DMaxWidth_ = 16384;
   info_.image2DMaxHeight_ = 16384;
   info_.image3DMaxWidth_ = 16384;
