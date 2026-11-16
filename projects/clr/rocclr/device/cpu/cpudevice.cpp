@@ -217,8 +217,7 @@ Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
 
   const cl_mem_flags memFlags = owner.getMemFlags();
   if ((memFlags & (CL_MEM_VA_RANGE_AMD | CL_MEM_BUS_ADDRESSABLE_AMD |
-                   CL_MEM_EXTERNAL_PHYSICAL_AMD | ROCCLR_MEM_INTERPROCESS |
-                   ROCCLR_MEM_HSA_SIGNAL_MEMORY)) ||
+                   ROCCLR_MEM_INTERPROCESS | ROCCLR_MEM_HSA_SIGNAL_MEMORY)) ||
       owner.ipcShared() ||
       owner.getSvmPtr() == reinterpret_cast<void*>(amd::Memory::MemoryType::kArenaMemoryPtr)) {
     LogError("Unsupported CPU buffer memory requirements!");
@@ -327,6 +326,33 @@ void* Device::svmAlloc(amd::Context& context, size_t size, size_t alignment,
   }
   amd::MemObjMap::AddMemObj(mem->getSvmPtr(), mem);
   return mem->getSvmPtr();
+}
+
+bool Device::GetSvmAttributes(void** data, size_t* data_sizes, int* attributes,
+                              size_t num_attributes, const void* dev_ptr, size_t count) const {
+  // Values of HSA_AMD_SVM_GLOBAL_FLAG_*, which HIP reports verbatim.
+  constexpr uint32_t kFineGrained = 0;
+  constexpr uint32_t kCoarseGrained = 1;
+
+  const amd::Memory* mem = amd::MemObjMap::FindMemObj(dev_ptr);
+  if (mem == nullptr) {
+    LogPrintfError("GetSvmAttributes received an unknown pointer: %p!", dev_ptr);
+    return false;
+  }
+
+  const bool isFineGrain = (mem->getMemFlags() & CL_MEM_SVM_FINE_GRAIN_BUFFER) != 0;
+
+  for (size_t i = 0; i < num_attributes; ++i) {
+    if (attributes[i] != amd::MemRangeAttribute::CoherencyMode) {
+      LogPrintfError("Unsupported SVM range attribute: %d!", attributes[i]);
+      return false;
+    }
+    if (data_sizes[i] != sizeof(uint32_t)) {
+      return false;
+    }
+    *reinterpret_cast<uint32_t*>(data[i]) = isFineGrain ? kFineGrained : kCoarseGrained;
+  }
+  return true;
 }
 
 void Device::svmFree(void* ptr) const {
