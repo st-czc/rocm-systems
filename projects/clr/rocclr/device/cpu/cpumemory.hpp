@@ -71,6 +71,39 @@ class Memory : public device::Memory {
   StorageOwnership ownership_;  //!< Selects whether and how ptr_ is released
 };
 
+//! CPU-side backing for an amd::Image object. The descriptor storage starts
+//! with the buffer resource descriptor (V#) used by buffer-format loads.
+class Image : public Memory {
+ public:
+  //! Constructor (from an amd::Image object)
+  Image(const Device& dev, amd::Memory& owner);
+
+  //! Default destructor
+  virtual ~Image() = default;
+
+  //! Returns the descriptor storage in place of the data pointer
+  virtual const address cpuSrd() const {
+    return reinterpret_cast<address>(const_cast<uint32_t*>(srd_));
+  }
+
+  //! Map the image storage and report its row and slice pitches
+  virtual void* cpuMap(device::VirtualDevice& vDev, uint flags = 0, uint startLayer = 0,
+                       uint numLayers = 0, size_t* rowPitch = NULL, size_t* slicePitch = NULL) {
+    const amd::Image* image = owner()->asImage();
+    if (rowPitch != nullptr) {
+      *rowPitch = image->getRowPitch();
+    }
+    if (slicePitch != nullptr) {
+      *slicePitch = image->getSlicePitch();
+    }
+    return Memory::cpuMap(vDev, flags, startLayer, numLayers, rowPitch, slicePitch);
+  }
+
+ private:
+  static constexpr size_t kSrdDwords = 12;  //!< Mirrors HIP_IMAGE_OBJECT_SIZE_DWORD
+  uint32_t srd_[kSrdDwords];
+};
+
 }  // namespace amd::cpu
 
 #endif /*CPUMEMORY_HPP_*/

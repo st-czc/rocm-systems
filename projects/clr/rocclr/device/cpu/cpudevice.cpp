@@ -10,6 +10,7 @@
 #include "os/os.hpp"
 #include "platform/context.hpp"
 #include "platform/runtime.hpp"
+#include "platform/sampler.hpp"
 #include "utils/debug.hpp"
 #include "utils/flags.hpp"
 
@@ -169,6 +170,10 @@ bool Device::create(const amd::Isa& isa) {
   info_.svmCapabilities_ |= CL_DEVICE_SVM_FINE_GRAIN_SYSTEM;
   info_.svmCapabilities_ |= CL_DEVICE_SVM_ATOMICS;
 
+  // Buffer-backed 1D textures only.
+  info_.imageSupport_ = 1;
+  info_.imageMaxBufferSize_ = 1 << 27;
+
   std::vector<amd::Device*> devices{this};
   context_ = new amd::Context(devices, amd::Context::Info());
   if (context_ == nullptr) {
@@ -187,7 +192,21 @@ device::Program* NullDevice::createProgram(amd::Program& owner, amd::option::Opt
 }
 
 device::Memory* Device::createMemory(amd::Memory& owner) const {
+  if (owner.asImage() != nullptr) {
+    return createImageMemory(owner);
+  }
   return createBufferMemory(owner, owner.getAlignment());
+}
+
+bool Device::createSampler(const amd::Sampler& owner, device::Sampler** sampler) const {
+  *sampler = nullptr;
+  Sampler* cpuSampler = new Sampler();
+  if (cpuSampler == nullptr || !cpuSampler->create(owner)) {
+    delete cpuSampler;
+    return false;
+  }
+  *sampler = cpuSampler;
+  return true;
 }
 
 Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
@@ -218,6 +237,55 @@ Memory* Device::createBufferMemory(amd::Memory& owner, size_t alignment) const {
     std::memcpy(reinterpret_cast<void*>(memory->virtualAddress()), pipeInit, sizeof(pipeInit));
   }
   return memory;
+}
+
+Image* Device::createImageMemory(amd::Memory& owner) const {
+  Image* image = new Image(*this, owner);
+  if (image == nullptr || !image->isValid()) {
+    LogError("Failed creating CPU image memory!");
+    delete image;
+    return nullptr;
+  }
+  // The V# encodes the base address in 48 bits.
+  if ((image->virtualAddress() >> 48) != 0) {
+    LogError("CPU image base address does not fit in the 48-bit V# field!");
+    delete image;
+    return nullptr;
+  }
+  return image;
+}
+
+Sampler::Sampler() : device::Sampler() {
+  std::memset(state_, 0, sizeof(state_));
+  hwState_ = reinterpret_cast<address>(state_);
+}
+
+static uint32_t samplerClamp(uint32_t mode) {
+  switch (mode) {
+    case CL_ADDRESS_REPEAT:
+      return 0;
+    case CL_ADDRESS_MIRRORED_REPEAT:
+      return 1;
+    case CL_ADDRESS_CLAMP_TO_EDGE:
+      return 2;
+    case CL_ADDRESS_CLAMP:
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+bool Sampler::create(const amd::Sampler& owner) {
+  // gfx9 S# subset: clamp U/V/W in DW0[2:0]/[5:3]/[8:6], force-unnormalized
+  // in DW0[15], mag/min filter in DW1[1:0] and DW1[3:2].
+  state_[0] = samplerClamp(owner.addressingMode(0)) |
+              (samplerClamp(owner.addressingMode(1)) << 3) |
+              (samplerClamp(owner.addressingMode(2)) << 6);
+  state_[0] |= owner.normalizedCoords() ? 0u : (1u << 15);
+
+  const uint32_t filter = (owner.filterMode() == CL_FILTER_LINEAR) ? 1u : 0u;
+  state_[1] = filter | (filter << 2);
+  return true;
 }
 
 void* Device::svmAlloc(amd::Context& context, size_t size, size_t alignment,
@@ -348,6 +416,12 @@ void NullDevice::fillDeviceInfo() {
   // hipMalloc3D produce a nonzero, aligned pitch even without image support.
   info_.imagePitchAlignment_ = 256;
   info_.imageBaseAddressAlignment_ = 256;
+  info_.image1DMaxWidth_ = 16384;
+  info_.image2DMaxWidth_ = 16384;
+  info_.image2DMaxHeight_ = 16384;
+  info_.image3DMaxWidth_ = 16384;
+  info_.image3DMaxHeight_ = 16384;
+  info_.image3DMaxDepth_ = 8192;
 
   // Offline targets cannot allocate or execute.
   info_.svmCapabilities_ = 0;

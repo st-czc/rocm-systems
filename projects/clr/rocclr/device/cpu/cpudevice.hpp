@@ -24,6 +24,23 @@
 //! CPU Device Implementation
 namespace amd::cpu {
 
+//! CPU-side sampler state. Buffer-format loads never read it, but the texture
+//! object copies its contents at creation time.
+class Sampler : public device::Sampler {
+ public:
+  Sampler();
+
+  //! Fills the sampler state from the platform sampler object.
+  bool create(const amd::Sampler& owner);
+
+  //! Default destructor
+  virtual ~Sampler() = default;
+
+ private:
+  static constexpr size_t kStateDwords = 8;  //!< Mirrors HIP_SAMPLER_OBJECT_SIZE_DWORD
+  uint32_t state_[kStateDwords];
+};
+
 //! Offline CPU target. Runtime resources are disabled.
 class NullDevice : public amd::Device {
  public:
@@ -199,6 +216,10 @@ class Device : public NullDevice {
   using NullDevice::createMemory;
   virtual device::Memory* createMemory(amd::Memory& owner) const override;
 
+  //! Sampler object allocation
+  virtual bool createSampler(const amd::Sampler& owner,
+                             device::Sampler** sampler) const override;
+
   //! Returns the CPU memory object for the given memory
   Memory* getCPUMemory(amd::Memory* mem) const {
     return static_cast<Memory*>(mem->getDeviceMemory(*this));
@@ -280,6 +301,9 @@ class Device : public NullDevice {
  private:
   //! Creates buffer backing with the requested system-memory alignment.
   Memory* createBufferMemory(amd::Memory& owner, size_t alignment) const;
+
+  //! Creates image backing with its buffer resource descriptor.
+  Image* createImageMemory(amd::Memory& owner) const;
 
   //! Scheduler shared by every command queue of this device
   std::unique_ptr<Pool> pool_;
