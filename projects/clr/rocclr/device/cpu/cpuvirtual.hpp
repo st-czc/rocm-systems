@@ -8,13 +8,17 @@
 #define CPUVIRTUAL_HPP_
 
 #include "device/device.hpp"
+#include "platform/command.hpp"
 
 #include <cstdint>
+#include <functional>
 
 //! CPU Device Implementation
 namespace amd::cpu {
 
 class Device;
+class Pool;
+class Queue;
 
 //! Host execution environment for one command queue. It runs supported memory
 //! commands synchronously in process memory.
@@ -35,63 +39,89 @@ class VirtualDevice : public device::VirtualDevice {
   virtual void submitReadMemory(amd::ReadMemoryCommand& cmd);
   virtual void submitWriteMemory(amd::WriteMemoryCommand& cmd);
   virtual void submitCopyMemory(amd::CopyMemoryCommand& cmd);
-  virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) { Unsupported("CopyMemoryP2P"); }
-  virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd) {
-    Unsupported("BatchCopyMemory");
+  virtual void submitCopyMemoryP2P(amd::CopyMemoryP2PCommand& cmd) {
+    submitUnsupported(cmd, "CopyMemoryP2P");
   }
-  virtual void SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd) {
-    Unsupported("BatchWriteMemory");
+  virtual void submitBatchCopyMemory(amd::BatchCopyMemoryCommand& cmd);
+  virtual void SubmitBatchWriteMemory(amd::BatchWriteMemoryCommand& cmd);
+  virtual void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd);
+  virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { submitUnsupported(cmd, "MapMemory"); }
+  virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "UnmapMemory");
   }
-  virtual void SubmitBatchReadMemory(amd::BatchReadMemoryCommand& cmd) {
-    Unsupported("BatchReadMemory");
-  }
-  virtual void submitMapMemory(amd::MapMemoryCommand& cmd) { Unsupported("MapMemory"); }
-  virtual void submitUnmapMemory(amd::UnmapMemoryCommand& cmd) { Unsupported("UnmapMemory"); }
   virtual void submitKernel(amd::NDRangeKernelCommand& cmd);
-  virtual void submitNativeFn(amd::NativeFnCommand& cmd) { Unsupported("NativeFn"); }
+  virtual void submitNativeFn(amd::NativeFnCommand& cmd) { submitUnsupported(cmd, "NativeFn"); }
   virtual void submitMarker(amd::Marker& cmd);
-  virtual void submitAccumulate(amd::AccumulateCommand& cmd) { Unsupported("Accumulate"); }
+  virtual void submitAccumulate(amd::AccumulateCommand& cmd) {
+    submitUnsupported(cmd, "Accumulate");
+  }
   virtual void submitExternalSemaphoreCmd(amd::ExternalSemaphoreCmd& cmd) {
-    Unsupported("ExternalSemaphore");
+    submitUnsupported(cmd, "ExternalSemaphore");
   }
   virtual void submitFillMemory(amd::FillMemoryCommand& cmd);
   virtual void submitMigrateMemObjects(amd::MigrateMemObjectsCommand& cmd) {
-    Unsupported("MigrateMemObjects");
+    submitUnsupported(cmd, "MigrateMemObjects");
   }
   virtual void submitAcquireExtObjects(amd::AcquireExtObjectsCommand& cmd) {
-    Unsupported("AcquireExtObjects");
+    submitUnsupported(cmd, "AcquireExtObjects");
   }
   virtual void submitReleaseExtObjects(amd::ReleaseExtObjectsCommand& cmd) {
-    Unsupported("ReleaseExtObjects");
+    submitUnsupported(cmd, "ReleaseExtObjects");
   }
-  virtual void submitPerfCounter(amd::PerfCounterCommand& cmd) { Unsupported("PerfCounter"); }
+  virtual void submitPerfCounter(amd::PerfCounterCommand& cmd) {
+    submitUnsupported(cmd, "PerfCounter");
+  }
   virtual void submitThreadTraceMemObjects(amd::ThreadTraceMemObjectsCommand& cmd) {
-    Unsupported("ThreadTraceMemObjects");
+    submitUnsupported(cmd, "ThreadTraceMemObjects");
   }
-  virtual void submitThreadTrace(amd::ThreadTraceCommand& cmd) { Unsupported("ThreadTrace"); }
+  virtual void submitThreadTrace(amd::ThreadTraceCommand& cmd) {
+    submitUnsupported(cmd, "ThreadTrace");
+  }
   virtual void flush(amd::Command* list = NULL, bool wait = false);
-  virtual void submitSvmFreeMemory(amd::SvmFreeMemoryCommand& cmd) { Unsupported("SvmFreeMemory"); }
-  virtual void submitSvmCopyMemory(amd::SvmCopyMemoryCommand& cmd) { Unsupported("SvmCopyMemory"); }
-  virtual void submitSvmFillMemory(amd::SvmFillMemoryCommand& cmd) { Unsupported("SvmFillMemory"); }
-  virtual void submitSvmMapMemory(amd::SvmMapMemoryCommand& cmd) { Unsupported("SvmMapMemory"); }
-  virtual void submitSvmUnmapMemory(amd::SvmUnmapMemoryCommand& cmd) {
-    Unsupported("SvmUnmapMemory");
+  virtual void submitSvmFreeMemory(amd::SvmFreeMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmFreeMemory");
   }
-  virtual void submitSignal(amd::SignalCommand& cmd) { Unsupported("Signal"); }
+  virtual void submitSvmCopyMemory(amd::SvmCopyMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmCopyMemory");
+  }
+  virtual void submitSvmFillMemory(amd::SvmFillMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmFillMemory");
+  }
+  virtual void submitSvmMapMemory(amd::SvmMapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmMapMemory");
+  }
+  virtual void submitSvmUnmapMemory(amd::SvmUnmapMemoryCommand& cmd) {
+    submitUnsupported(cmd, "SvmUnmapMemory");
+  }
+  virtual void submitSignal(amd::SignalCommand& cmd) { submitUnsupported(cmd, "Signal"); }
   virtual void submitMakeBuffersResident(amd::MakeBuffersResidentCommand& cmd) {
-    Unsupported("MakeBuffersResident");
+    submitUnsupported(cmd, "MakeBuffersResident");
   }
 
  private:
-  //! Fills a memory object with a pattern
-  bool fillMemory(cl_command_type type, amd::Memory* amdMemory, const void* pattern,
-                  size_t patternSize, const amd::Coord3D& surface, const amd::Coord3D& origin,
-                  const amd::Coord3D& size);
-
   //! The host backend implements no command.
   void Unsupported(const char* command);
 
+  //! Submits one command as a single-ticket packet. work runs on a pool worker
+  //! and does no bookkeeping: the decision it runs was made before submission.
+  void submit(amd::Command& cmd, std::function<void()> work);
+
+  //! Submits a command whose work splits across numTickets workers. task takes
+  //! the ticket, handed out in descending order.
+  void submit(amd::Command& cmd, uint32_t numTickets, std::function<void(int)> task);
+
+  //! Fails a command the backend does not implement, without submitting it.
+  void submitUnsupported(amd::Command& cmd, const char* command);
+
+  //! Advances every command of the batch to COMPLETE and drops its batch reference.
+  static void updateBatchState(amd::Command* list);
+
+  //! Submits a single-ticket packet and waits for its completion.
+  void submitSync(amd::Command& cmd, std::function<void()> work);
+
   const Device& dev_;
+  Pool& pool_;
+  Queue* queue_;
 
   //! Disable default copy constructor
   VirtualDevice(const VirtualDevice&);

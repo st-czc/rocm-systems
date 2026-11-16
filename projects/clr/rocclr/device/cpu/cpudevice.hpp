@@ -13,9 +13,11 @@
 
 #include "cpukernel.hpp"
 #include "cpumemory.hpp"
-#include "cputhreadpool.hpp"
 #include "cpuvirtual.hpp"
+#include "threadpool.hpp"
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -202,8 +204,8 @@ class Device : public NullDevice {
     return static_cast<Memory*>(mem->getDeviceMemory(*this));
   }
 
-  //! Returns the launch thread pool shared by all virtual devices
-  ThreadPool& threadPool() const { return threadPool_; }
+  //! Returns the scheduling pool that owns every queue, worker and signal
+  Pool& pool() const { return *pool_; }
 
   virtual void* svmAlloc(amd::Context& context, size_t size, size_t alignment,
                          cl_svm_mem_flags flags = CL_MEM_READ_WRITE,
@@ -211,6 +213,9 @@ class Device : public NullDevice {
   virtual void svmFree(void* ptr) const override;
 
   virtual device::Signal* createSignal() const override { return new device::HostSignal; }
+
+  bool IsHwEventReady(const amd::Event& event, bool wait = false,
+                      amd::SyncPolicy policy = amd::SyncPolicy::Auto) const override;
 
   // Preserve the online device's existing query and placeholder behavior.
   virtual device::Memory* createView(amd::Memory& owner,
@@ -276,8 +281,8 @@ class Device : public NullDevice {
   //! Creates buffer backing with the requested system-memory alignment.
   Memory* createBufferMemory(amd::Memory& owner, size_t alignment) const;
 
-  //! The launch thread pool owned by this device
-  mutable ThreadPool threadPool_;
+  //! Scheduler shared by every command queue of this device
+  std::unique_ptr<Pool> pool_;
 
   //! Disable default copy constructor
   Device(const Device&);

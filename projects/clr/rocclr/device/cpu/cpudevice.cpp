@@ -149,10 +149,15 @@ bool Device::create(const amd::Isa& isa) {
     return false;
   }
 
-  if (!threadPool_.start(std::thread::hardware_concurrency())) {
-    LogError("Unable to start the CPU thread pool!");
+  // VIRTUAL_CPU_NUM_WORKERS overrides the host CPU count; 0 means "use the host count".
+  const uint32_t numWorkers =
+      VIRTUAL_CPU_NUM_WORKERS != 0 ? VIRTUAL_CPU_NUM_WORKERS : std::thread::hardware_concurrency();
+  if (numWorkers == 0) {
+    LogError("The CPU backend needs at least one worker!");
     return false;
   }
+
+  pool_.reset(new Pool(numWorkers));
 
   online_ = true;
   info_.available_ = 1;
@@ -363,6 +368,10 @@ void NullDevice::fillDeviceInfo() {
   settings_->enableExtension(ClKhrInt64BaseAtomics);
   settings_->enableExtension(ClKhrInt64ExtendedAtomics);
   settings_->enableExtension(ClKhrByteAddressableStore);
+}
+
+bool Device::IsHwEventReady(const amd::Event& event, bool wait, amd::SyncPolicy policy) const {
+  return pool().isEventDone(&event);
 }
 
 }  // namespace amd::cpu
