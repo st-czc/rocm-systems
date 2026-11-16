@@ -337,14 +337,29 @@ void Device::svmFree(void* ptr) const {
   }
 }
 
+void Device::addAllocatedBytes(size_t bytes) const {
+  allocatedBytes_.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void Device::subAllocatedBytes(size_t bytes) const {
+  uint64_t allocated = allocatedBytes_.load(std::memory_order_relaxed);
+  while (!allocatedBytes_.compare_exchange_weak(
+      allocated, (bytes >= allocated) ? 0 : allocated - bytes, std::memory_order_relaxed)) {
+  }
+}
+
 bool Device::globalFreeMemory(size_t* freeMemory) const {
   constexpr size_t kTotalFreeMemory = 0;
   constexpr size_t kLargestFreeBlock = 1;
 
-  uint64_t available = info_.globalMemSize_;
+  const uint64_t allocated = allocatedBytes_.load(std::memory_order_relaxed);
+  const uint64_t deviceAvailable =
+      (allocated >= info_.globalMemSize_) ? 0 : info_.globalMemSize_ - allocated;
+
+  uint64_t available = deviceAvailable;
   uint64_t hostAvailable;
   if (hostAvailableMemory(hostAvailable)) {
-    available = std::min(hostAvailable, info_.globalMemSize_);
+    available = std::min(hostAvailable, deviceAvailable);
   }
 
   freeMemory[kTotalFreeMemory] = static_cast<size_t>(available / Ki);
@@ -362,6 +377,8 @@ void NullDevice::fillDeviceInfo() {
   ::strncpy(info_.vendor_, "AMD", sizeof(info_.vendor_) - 1);
   ::strncpy(info_.boardName_, "CPU", sizeof(info_.boardName_) - 1);
   ::snprintf(info_.driverVersion_, sizeof(info_.driverVersion_), "%d.%d", 1, 0);
+
+  info_.wallClockFrequency_ = 2000000;
 
   // One compute unit, one work item at a time. The wavefront width must not be
   // zero. TODO: The limits below match gfx906. Derive them from the host.
@@ -402,6 +419,7 @@ void NullDevice::fillDeviceInfo() {
   info_.localMemSize_ = 64 * Ki;
   info_.localMemSizePerCU_ = 64 * Ki;
   info_.globalMemSize_ = amd::Os::hostTotalPhysicalMemory() / 2;
+  info_.globalMemSize_ = std::min(info_.globalMemSize_, static_cast<uint64_t>(64 * Gi));
   info_.globalMemSize_ = std::max(info_.globalMemSize_, static_cast<uint64_t>(1 * Gi));
   info_.maxMemAllocSize_ = amd::alignDown(info_.globalMemSize_, sizeof(uint64_t));
   info_.maxPhysicalMemAllocSize_ = amd::Os::getPhysicalMemSize();
@@ -409,7 +427,9 @@ void NullDevice::fillDeviceInfo() {
   info_.preferredConstantBufferSize_ = 64 * Ki;
   info_.maxParameterSize_ = 1024;
   info_.globalMemCacheLineSize_ = 64;
-  info_.memBaseAddrAlign_ = 128;
+  // The original definition of the field is in bits for OpenCL. hipamd uses
+  // the field as a byte alignment. This target stores 256 bytes.
+  info_.memBaseAddrAlign_ = 256;
   info_.minDataTypeAlignSize_ = 128;
 
   // Linear memory layout. Set unconditionally so that hipMallocPitch and

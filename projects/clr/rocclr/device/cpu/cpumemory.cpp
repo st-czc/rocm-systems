@@ -9,6 +9,7 @@
 #include "device/cpu/cpudevice.hpp"
 #include "os/alloc.hpp"
 #include "utils/debug.hpp"
+#include "utils/util.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -112,8 +113,11 @@ std::tuple<uint32_t, uint32_t, uint32_t> getSrdFormat(const amd::Image& image) {
 }  // namespace
 
 Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
-    : device::Memory(owner), dev_(dev), ptr_(nullptr),
-      ownership_(StorageOwnership::Borrowed) {
+    : device::Memory(owner),
+      dev_(dev),
+      ptr_(nullptr),
+      ownership_(StorageOwnership::Borrowed),
+      countedBytes_(0) {
   if (owner.parent() != nullptr) {
     device::Memory* parent = owner.parent()->getDeviceMemory(dev_);
     if (parent == nullptr || parent->virtualAddress() == 0) {
@@ -141,7 +145,10 @@ Memory::Memory(const Device& dev, amd::Memory& owner, size_t alignment)
                   std::max(alignment, static_cast<size_t>(owner.getAlignment())))) {
       return;
     }
-    ownership_ = StorageOwnership::AlignedAllocation;
+    if ((owner.getMemFlags() & CL_MEM_SVM_FINE_GRAIN_BUFFER) == 0) {
+      countedBytes_ = owner.getSize();
+      dev_.addAllocatedBytes(countedBytes_);
+    }
     if (ptr_ != nullptr && (owner.getMemFlags() & CL_MEM_COPY_HOST_PTR) &&
         owner.getHostMem() != nullptr) {
       std::memcpy(ptr_, owner.getHostMem(), owner.getSize());
@@ -167,23 +174,18 @@ Memory::~Memory() {
 }
 
 bool Memory::allocate(size_t size, size_t alignment) {
-  if (size == 0) {
+  if (size == 0 || !amd::isPowerOfTwo(alignment)) {
     return false;
   }
 
-  // posix_memalign requires a nonzero power-of-two multiple of sizeof(void*).
   alignment = std::max(alignment, static_cast<size_t>(dev_.info().memBaseAddrAlign_));
-  alignment = std::max(alignment, sizeof(void*));
-  if ((alignment & (alignment - 1)) != 0) {
-    LogError("CPU memory alignment must be a power of two!");
-    return false;
-  }
+
   ptr_ = static_cast<address>(amd::AlignedMemory::allocate(size, alignment));
   if (ptr_ == nullptr) {
-    LogError("Unable to allocate host memory!");
     return false;
   }
 
+  ownership_ = StorageOwnership::AlignedAllocation;
   return true;
 }
 
@@ -193,6 +195,10 @@ void Memory::release() {
   }
   if (ownership_ == StorageOwnership::AlignedAllocation) {
     amd::AlignedMemory::deallocate(ptr_);
+  }
+  if (countedBytes_ != 0) {
+    dev_.subAllocatedBytes(countedBytes_);
+    countedBytes_ = 0;
   }
   ptr_ = nullptr;
   ownership_ = StorageOwnership::Borrowed;
