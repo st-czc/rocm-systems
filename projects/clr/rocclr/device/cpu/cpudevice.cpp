@@ -162,6 +162,7 @@ bool Device::create(const amd::Isa& isa) {
 
   online_ = true;
   info_.available_ = 1;
+  info_.pcie_atomics_ = true;
   // Copy the system-memory capabilities from the online device. The offline
   // target has no SVM devices.
   info_.svmCapabilities_ = 0;
