@@ -20,9 +20,6 @@
 
 namespace amd::cpu {
 
-//! Suffix of the per-kernel subhandler exported by the Native CPU pipeline.
-static constexpr std::string_view kSubhandlerSuffix = ".SYCLNCPU";
-
 //! ELF device image for this host. The fat binary marks it with the AMDGPU
 //! machine and the HSA OS ABI so the loader rejects it. The runtime removes the
 //! mark before it hands the image to the loader.
@@ -187,7 +184,7 @@ bool Program::setKernels(void* binary, size_t binSize, amd::Os::FileDesc fdesc, 
 
   for (const auto& it : kernels()) {
     Kernel* kernel = static_cast<Kernel*>(it.second);
-    const std::string symbol = kernel->name() + std::string(kSubhandlerSuffix);
+    const std::string symbol = kernel->name();
 
     auto entry = reinterpret_cast<Subhandler>(amd::Os::getSymbol(imageHandle_, symbol.c_str()));
     if (entry == nullptr) {
